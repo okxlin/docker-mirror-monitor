@@ -67,14 +67,14 @@ docker run -d \
   -p 9080:9080 \
   -v $(pwd)/config.yaml:/app/data/config.yaml \
   -v $(pwd)/data:/app/data \
-  docker-mirror-monitor:latest
+  moelin/docker-mirror-monitor:latest
 
 # 使用 docker-compose
 cat > docker-compose.yaml << 'EOF'
 version: '3'
 services:
   monitor:
-    image: docker-mirror-monitor:latest
+    image: moelin/docker-mirror-monitor:latest
     ports:
       - "9080:9080"
     volumes:
