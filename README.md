@@ -161,18 +161,18 @@ server:
   # 站点配置
   site:
     logo: "容器镜像监控"        # Header左侧Logo文字
-    logo_icon: "fa-docker"      # Logo图标（Font Awesome）
+    logo_icon: "fab fa-docker"  # Logo图标（需带 fab/fas 前缀）
     title: "容器镜像加速器监控"  # 页面主标题
     description: "实时监控多种容器镜像源的加速器状态"  # 页面描述
     browser_title: "容器镜像监控"  # 浏览器标签页标题
     favicon: ""                 # favicon图标URL
   
-  # 顶部广告栏配置
-  header_ad:
+  # 顶部公告配置
+  site_notice:                  # 原 header_ad 改为 site_notice
     enabled: false              # 是否启用
-    text: "限时优惠！"          # 广告文字
+    text: "限时优惠！"          # 公告文字
     url: ""                     # 点击跳转链接
-    icon: "fa-tag"              # Font Awesome图标
+    icon: "fas fa-tag"          # 增加 fas 前缀
     color: "#ff6b6b"            # 文字颜色
     bg_color: "rgba(255,107,107,0.1)"  # 背景颜色
   
@@ -229,6 +229,22 @@ server:
     - keyword: "限"
       color: "#ff5722"
       bg_color: "rgba(255,87,34,0.15)"
+
+  # 关于页面配置
+  about:
+    enabled: true
+    title: "关于本项目"
+    # ...
+    
+    # 合作伙伴/推荐配置
+    partners:
+      enabled: false
+      items:
+        - title: "推荐服务"
+          description: "优质云服务"
+          url: "https://example.com"
+          image: ""
+          color: "#4f6ef7"
 
 groups:
   # Docker Hub 镜像源
@@ -304,23 +320,23 @@ site:
   favicon: "https://example.com/favicon.ico"
 ```
 
-#### header_ad 顶部广告栏配置
+#### site_notice 顶部公告配置
 
 | 配置项 | 类型 | 说明 | 默认值 |
 |--------|------|------|--------|
 | `enabled` | bool | 是否启用 | `false` |
-| `text` | string | 广告文字 | `"限时优惠！"` |
+| `text` | string | 公告文字 | `"站点公告"` |
 | `url` | string | 点击跳转链接 | `""` |
-| `icon` | string | Font Awesome图标 | `"fa-tag"` |
+| `icon` | string | Font Awesome图标 | `"fas fa-bullhorn"` |
 | `color` | string | 文字颜色 | `"#ff6b6b"` |
 | `bg_color` | string | 背景颜色 | `"rgba(255,107,107,0.1)"` |
 
 ```yaml
-header_ad:
+site_notice:
   enabled: true
   text: "🎉 限时优惠活动"
   url: "https://example.com/promo"
-  icon: "fa-gift"
+  icon: "fas fa-bullhorn"
   color: "#ff6b6b"
   bg_color: "rgba(255,107,107,0.12)"
 ```
@@ -384,6 +400,27 @@ tag_colors:
 #### about 关于页面配置
 
 关于页面的详细配置选项，包括启用状态、标题、描述等。
+
+#### partners 合作伙伴/推荐配置
+
+| 配置项 | 类型 | 说明 |
+|--------|------|------|
+| `title` | string | 标题 |
+| `description` | string | 描述 |
+| `url` | string | 跳转链接 |
+| `image` | string | 图片URL |
+| `color` | string | 颜色值 |
+
+```yaml
+partners:
+  enabled: true
+  items:
+    - title: "推荐服务"
+      description: "优质云服务"
+      url: "https://example.com"
+      image: ""
+      color: "#4f6ef7"
+```
 
 ### groups 监控分组配置
 
@@ -816,6 +853,10 @@ server {
     logo_icon: "fab fa-docker"  # 品牌图标
     logo_icon: "fas fa-server"  # 实心图标
     ```
+
+> **注意**：本项目使用 Font Awesome 5，请务必添加正确的风格前缀：
+> * **品牌图标** (GitHub, Docker, 微信)：使用 **`fab`** (如 `fab fa-weixin`)
+> * **常规图标** (Home, Server, Link)：使用 **`fas`** (如 `fas fa-link`)
 
 2.  **网络图片**：
     ```yaml
