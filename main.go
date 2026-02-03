@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"html/template"
+	"io"
 	"log"
 	"math/rand"
 	"net"
@@ -96,8 +97,8 @@ type Donate struct {
 	Items       []DonateItem `yaml:"items" json:"items"`
 }
 
-// AdItem 广告项
-type AdItem struct {
+// PartnerItem 合作伙伴/推荐项 (原 AdItem)
+type PartnerItem struct {
 	Title       string `yaml:"title" json:"title"`
 	Description string `yaml:"description" json:"description"`
 	URL         string `yaml:"url" json:"url"`
@@ -105,10 +106,10 @@ type AdItem struct {
 	Color       string `yaml:"color" json:"color"`
 }
 
-// Ads 广告配置
-type Ads struct {
-	Enabled bool     `yaml:"enabled" json:"enabled"`
-	Items   []AdItem `yaml:"items" json:"items"`
+// Partners 合作伙伴配置 (原 Ads)
+type Partners struct {
+	Enabled bool          `yaml:"enabled" json:"enabled"`
+	Items   []PartnerItem `yaml:"items" json:"items"`
 }
 
 // AboutLink 关于页面链接
@@ -134,7 +135,7 @@ type About struct {
 	Description    string      `yaml:"description" json:"description"`
 	CustomHTMLFile string      `yaml:"custom_html_file" json:"custom_html_file"`
 	Donate         Donate      `yaml:"donate" json:"donate"`
-	Ads            Ads         `yaml:"ads" json:"ads"`
+	Partners       Partners    `yaml:"partners" json:"partners"` // [修改] 重命名防止被拦截
 	Links          []AboutLink `yaml:"links" json:"links"`
 	Disclaimer     Disclaimer  `yaml:"disclaimer" json:"disclaimer"`
 }
@@ -1898,19 +1899,40 @@ const htmlTemplate = `<!DOCTYPE html>
             margin-bottom: 16px;
         }
         .donate-header i { font-size: 1.25rem; }
-        .donate-qrcode {
-            max-width: 160px;
-            width: 100%;
-            border-radius: 8px;
+        /* --- 修改开始：优化二维码显示效果 --- */
+        .donate-qrcode-wrapper {
+            position: relative;
+            display: inline-block;
+            margin-top: 10px;
         }
+        .donate-qrcode {
+            max-width: 150px; /* 默认显示大小 */
+            width: 100%;
+            border-radius: 12px;
+            transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275); /*以此实现弹性放大效果*/
+            cursor: zoom-in;
+            border: 1px solid var(--border-color);
+            background: #fff; /* 防止透明底图片在深色模式下看不清 */
+            transform-origin: center center;
+        }
+        /* 鼠标悬停时的放大效果 */
+        .donate-qrcode:hover {
+            transform: scale(2.2); /* 放大 2.2 倍 */
+            box-shadow: 0 15px 35px rgba(0,0,0,0.25); /* 增加强阴影 */
+            z-index: 100; /* 确保浮在最上层 */
+            position: relative;
+            border-color: var(--primary);
+        }
+        /* --- 修改结束 --- */
         
-        .ads-grid {
+        /* --- 修改开始：重命名 CSS 类防止去广告插件误杀 --- */
+        .partners-grid {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
             gap: 16px;
             margin-top: 16px;
         }
-        .ad-item {
+        .partner-item {
             display: flex;
             align-items: center;
             gap: 16px;
@@ -1922,18 +1944,19 @@ const htmlTemplate = `<!DOCTYPE html>
             border: 2px solid var(--border-color);
             transition: all 0.3s;
         }
-        .ad-item:hover {
+        .partner-item:hover {
             transform: translateY(-2px);
             box-shadow: var(--card-shadow-hover);
         }
-        .ad-image {
+        .partner-image {
             width: 60px;
             height: 60px;
             border-radius: 8px;
             object-fit: cover;
         }
-        .ad-content h4 { margin-bottom: 4px; font-weight: 600; }
-        .ad-content p { font-size: 0.85rem; color: var(--text-secondary); margin: 0; }
+        .partner-content h4 { margin-bottom: 4px; font-weight: 600; }
+        .partner-content p { font-size: 0.85rem; color: var(--text-secondary); margin: 0; }
+        /* --- 修改结束 --- */
         
         .about-custom-content {
             background: var(--bg-secondary);
@@ -2097,15 +2120,15 @@ const htmlTemplate = `<!DOCTYPE html>
                 </div>
 
                 <div class="mirror-grid">
-                    {{range $group.Results}}
-                    <div class="mirror-option" data-name="{{.Name}}" data-url="{{.URL}}" data-status="{{.Status}}">
+                    {{range $idx, $res := $group.Results}}
+                    <div class="mirror-option" id="mirror-{{$group.ID}}-{{$idx}}" data-name="{{$res.Name}}" data-url="{{$res.URL}}" data-status="{{$res.Status}}">
                         <input type="checkbox" class="mirror-checkbox">
                         <div class="mirror-info">
                             <div class="mirror-name-row">
-                                <span class="mirror-status {{.Status}}"></span>
-                                <span class="mirror-name">{{.Name}}</span>
+                                <span class="mirror-status {{$res.Status}}"></span>
+                                <span class="mirror-name">{{$res.Name}}</span>
                             </div>
-                            <div class="mirror-url">{{.URL}}</div>
+                            <div class="mirror-url">{{$res.URL}}</div>
                         </div>
                     </div>
                     {{end}}
@@ -2139,20 +2162,20 @@ const htmlTemplate = `<!DOCTYPE html>
                             </tr>
                         </thead>
                         <tbody class="status-tbody">
-                            {{range $group.Results}}
-                            <tr data-name="{{.Name}}">
-                                <td><span class="status-dot {{.Status}}"></span></td>
-                                <td class="site-name">{{.Name}}</td>
-                                <td><span class="site-url" onclick="copyUrl('{{.URL}}')">{{.URL}}</span></td>
-                                <td class="latency">{{if eq .LatencyMs -1}}--{{else}}{{.LatencyMs}} ms{{end}}</td>
+                            {{range $idx, $res := $group.Results}}
+                            <tr id="row-{{$group.ID}}-{{$idx}}" data-name="{{$res.Name}}">
+                                <td><span class="status-dot {{$res.Status}}"></span></td>
+                                <td class="site-name">{{$res.Name}}</td>
+                                <td><span class="site-url" onclick="copyUrl('{{$res.URL}}')">{{$res.URL}}</span></td>
+                                <td class="latency">{{if eq $res.LatencyMs -1}}--{{else}}{{$res.LatencyMs}} ms{{end}}</td>
                                 <td>
                                     <div class="tags">
-                                        {{range .Tags}}
+                                        {{range $res.Tags}}
                                         <span class="tag {{tagClass .}}">{{.}}</span>
                                         {{end}}
                                     </div>
                                 </td>
-                                <td class="check-time">{{formatTime .CheckedAt}}</td>
+                                <td class="check-time">{{formatTime $res.CheckedAt}}</td>
                             </tr>
                             {{end}}
                         </tbody>
@@ -2187,20 +2210,6 @@ const htmlTemplate = `<!DOCTYPE html>
                     </div>
                 </div>
 
-                {{if .About.Links}}
-                <div class="about-links card">
-                    <h3 class="card-title"><i class="fa fa-link"></i> 相关链接</h3>
-                    <div class="links-grid">
-                        {{range .About.Links}}
-                        <a href="{{.URL}}" target="_blank" rel="noopener" class="link-item">
-                            <i class="{{if .Icon}}{{.Icon}}{{else}}fa-external-link{{end}}"></i>
-                            <span>{{.Name}}</span>
-                        </a>
-                        {{end}}
-                    </div>
-                </div>
-                {{end}}
-
                 {{if .About.Donate.Enabled}}
                 <div class="about-donate card">
                     <h3 class="card-title"><i class="fa fa-heart"></i> {{if .About.Donate.Title}}{{.About.Donate.Title}}{{else}}支持本项目{{end}}</h3>
@@ -2216,7 +2225,9 @@ const htmlTemplate = `<!DOCTYPE html>
                                 <span>{{.Name}}</span>
                             </div>
                             {{if .QRCode}}
-                            <img src="{{.QRCode}}" alt="{{.Name}}" class="donate-qrcode">
+                            <div class="donate-qrcode-wrapper">
+                                <img src="{{.QRCode}}" alt="{{.Name}}" class="donate-qrcode" title="点击或悬停放大">
+                            </div>
                             {{end}}
                         </div>
                         {{end}}
@@ -2225,17 +2236,17 @@ const htmlTemplate = `<!DOCTYPE html>
                 </div>
                 {{end}}
 
-                {{if .About.Ads.Enabled}}
-                {{if .About.Ads.Items}}
-                <div class="about-ads card">
+                {{if .About.Partners.Enabled}}
+                {{if .About.Partners.Items}}
+                <div class="about-partners card">
                     <h3 class="card-title"><i class="fa fa-bullhorn"></i> 推荐服务</h3>
-                    <div class="ads-grid">
-                        {{range .About.Ads.Items}}
-                        <a href="{{.URL}}" target="_blank" rel="noopener" class="ad-item" style="{{if .Color}}border-color: {{.Color}}{{end}}">
+                    <div class="partners-grid">
+                        {{range .About.Partners.Items}}
+                        <a href="{{.URL}}" target="_blank" rel="noopener" class="partner-item" style="{{if .Color}}border-color: {{.Color}}{{end}}">
                             {{if .Image}}
-                            <img src="{{.Image}}" alt="{{.Title}}" class="ad-image">
+                            <img src="{{.Image}}" alt="{{.Title}}" class="partner-image">
                             {{end}}
-                            <div class="ad-content">
+                            <div class="partner-content">
                                 <h4>{{.Title}}</h4>
                                 <p>{{.Description}}</p>
                             </div>
@@ -2244,6 +2255,20 @@ const htmlTemplate = `<!DOCTYPE html>
                     </div>
                 </div>
                 {{end}}
+                {{end}}
+
+                {{if .About.Links}}
+                <div class="about-links card">
+                    <h3 class="card-title"><i class="fa fa-link"></i> 相关链接</h3>
+                    <div class="links-grid">
+                        {{range .About.Links}}
+                        <a href="{{.URL}}" target="_blank" rel="noopener" class="link-item">
+                            <i class="{{if .Icon}}{{.Icon}}{{else}}fa-external-link{{end}}"></i>
+                            <span>{{.Name}}</span>
+                        </a>
+                        {{end}}
+                    </div>
+                </div>
                 {{end}}
 
                 {{if .About.Disclaimer.Enabled}}
@@ -2409,36 +2434,36 @@ const htmlTemplate = `<!DOCTYPE html>
             });
         });
 
-        // WebSocket
+        // --- 智能混合模式核心逻辑 ---
+
+        // 1. 获取后端配置的刷新间隔 (秒)
+        const refreshIntervalSec = {{.RefreshIntervalSeconds}};
+        // 2. 设定阈值：如果间隔 <= 300秒(5分钟)，视为"实时模式"，否则为"省流模式"
+        const isShortInterval = refreshIntervalSec <= 300;
+
         const wsDot = document.getElementById('ws-dot');
         const wsText = document.getElementById('ws-text');
         let ws;
         let reconnectTimer;
 
+        // --- 模式 A: WebSocket (适用于短间隔) ---
         function connectWebSocket() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             ws = new WebSocket(protocol + '//' + window.location.host + '/ws');
             
             ws.onopen = () => {
-                wsDot.classList.add('connected');
+                wsDot.className = 'ws-dot connected';
                 wsText.textContent = '实时连接';
-                console.log('WebSocket 已连接');
             };
             
             ws.onclose = () => {
-                wsDot.classList.remove('connected');
+                wsDot.className = 'ws-dot';
                 wsText.textContent = '重连中...';
-                console.log('WebSocket 断开，5秒后重连');
                 reconnectTimer = setTimeout(connectWebSocket, 5000);
             };
             
-            ws.onerror = (err) => {
-                console.error('WebSocket 错误:', err);
-            };
-            
             ws.onmessage = (event) => {
-                const data = JSON.parse(event.data);
-                updateUI(data);
+                updateUI(JSON.parse(event.data));
             };
         }
 
@@ -2456,9 +2481,11 @@ const htmlTemplate = `<!DOCTYPE html>
                 groupEl.querySelector('.last-check').textContent = '上次检查: ' + data.checked_at;
 
                 // 更新表格和镜像选择
-                group.results.forEach(result => {
+                group.results.forEach((result, index) => { // <--- 增加 index 参数
                     // 更新表格行
-                    const row = groupEl.querySelector('tr[data-name="' + result.name + '"]');
+                    // 使用 ID 查找，彻底解决特殊字符导致的选择器错误
+                    const row = document.getElementById('row-' + group.id + '-' + index);
+                    
                     if (row) {
                         const statusDot = row.querySelector('.status-dot');
                         const oldStatus = statusDot.className.split(' ').find(c => ['healthy', 'slow', 'timeout', 'error'].includes(c));
@@ -2473,7 +2500,8 @@ const htmlTemplate = `<!DOCTYPE html>
                     }
 
                     // 更新镜像选择状态
-                    const mirrorOpt = groupEl.querySelector('.mirror-option[data-name="' + result.name + '"]');
+                    // 使用 ID 查找，彻底解决特殊字符导致的选择器错误
+                    const mirrorOpt = document.getElementById('mirror-' + group.id + '-' + index);
                     if (mirrorOpt) {
                         mirrorOpt.dataset.status = result.status;
                         const statusIndicator = mirrorOpt.querySelector('.mirror-status');
@@ -2483,7 +2511,63 @@ const htmlTemplate = `<!DOCTYPE html>
             });
         }
 
-        connectWebSocket();
+        // --- 模式 B: HTTP 定时拉取 (适用于长间隔) ---
+        function fetchStatus() {
+            fetch('/api/status')
+                .then(res => {
+                    // 1. 先判断 HTTP 状态码
+                    if (!res.ok) {
+                        throw new Error("HTTP error " + res.status);
+                    }
+                    return res.json();
+                })
+                .then(data => {
+                    // 2. 数据已经成功拿到了！此时应标记为"已同步"
+                    wsDot.className = 'ws-dot connected';
+                    wsText.textContent = '已同步 ' + new Date().toLocaleTimeString('en-US', {hour12: false});
+                    
+                    // 1.5秒后恢复静默灰点
+                    setTimeout(() => {
+                        wsDot.className = 'ws-dot';
+                    }, 1500);
+
+                    // 3. 尝试更新 UI (把容易报错的逻辑放在最后，或者包起来)
+                    try {
+                        updateUI(data);
+                    } catch (e) {
+                        console.error("UI渲染出现微小异常 (不影响数据同步):", e);
+                        // 这里吃掉 UI 错误，防止它触发外层的 .catch 导致显示"同步失败"
+                    }
+                })
+                .catch(err => {
+                    // 4. 只有真正的网络错误/JSON解析错误才会走到这里
+                    console.error('Fetch error:', err);
+                    wsText.textContent = '同步失败';
+                    wsDot.className = 'ws-dot error'; // 变红 (如果CSS支持)
+                });
+        }
+
+        // --- 启动入口 ---
+        if (isShortInterval) {
+            // 场景 1: 短间隔 (<= 5分钟) -> 启用 WebSocket
+            // 优势: 体验丝滑，后端探测完前端立刻变色
+            console.log("模式: 短间隔 (" + refreshIntervalSec + "s)，启用 WebSocket");
+            connectWebSocket();
+        } else {
+            // 场景 2: 长间隔 (> 5分钟) -> 启用 HTTP 定时拉取
+            // 优势: 无长连接，无超时报错，极低资源占用
+            console.log("模式: 长间隔 (" + refreshIntervalSec + "s)，启用 HTTP 拉取");
+            wsText.textContent = '省流模式';
+            
+            // 1. 进页面立刻拉取一次最新状态
+            fetchStatus();
+            
+            // 2. 按照配置的间隔定时拉取 (例如每30分钟拉一次，保持页面数据不过期)
+            // 注意：JS定时器单位是毫秒
+            if (refreshIntervalSec > 0) {
+                setInterval(fetchStatus, refreshIntervalSec * 1000);
+            }
+        }
 
         // 获取分组的registry域名
         function getRegistryDomain(groupId) {
@@ -2729,6 +2813,8 @@ type PageData struct {
 	About                 About
 	AboutContent          string // 自定义HTML文件的内容
 	LastCheck             string
+	// [新增] 传递刷新间隔秒数给前端
+	RefreshIntervalSeconds int64
 }
 
 func tagClass(tag string) string {
@@ -3052,6 +3138,8 @@ func main() {
 			About:                 currentConfig.Server.About,
 			AboutContent:          aboutContent,
 			LastCheck:             time.Now().Format("2006-01-02 15:04:05"),
+			// [新增] 注入配置数据
+			RefreshIntervalSeconds: int64(currentConfig.Server.RefreshInterval.Seconds()),
 		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -3134,7 +3222,7 @@ func main() {
 
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"groups":     groupStatuses,
-			"checked_at": time.Now(),
+			"checked_at": time.Now().Format("2006-01-02 15:04:05"),
 		})
 	})
 
@@ -3201,10 +3289,20 @@ func main() {
 		})
 	})
 
+	// 定义错误日志记录器
+	// 如果未开启 Debug，则将 Server 内部错误（如 TLS 握手错误）丢弃到 io.Discard
+	var serverErrorLog *log.Logger
+	if config.Server.Debug {
+		serverErrorLog = log.New(os.Stderr, "", log.LstdFlags)
+	} else {
+		serverErrorLog = log.New(io.Discard, "", 0)
+	}
+
 	// 定义生产级 Server 配置
 	srv := &http.Server{
 		Addr:              config.Server.Listen,
 		Handler:           nil, // 使用默认路由
+		ErrorLog:          serverErrorLog,   // 接管内部错误日志
 		ReadHeaderTimeout: 5 * time.Second,  // 防止 Slowloris 攻击
 		ReadTimeout:       15 * time.Second, // 防止读取主体过慢
 		WriteTimeout:      15 * time.Second, // 防止响应写入阻塞

@@ -1,7 +1,7 @@
 server:
   listen: ":9080"
   debug: false              # 调试模式：false=只显示错误/启动信息，true=显示所有连接日志
-  refresh_interval: 1800s    # 全局刷新间隔
+  refresh_interval: 1800s    # 全局刷新间隔，<= 300s，系统将自动启用 WebSocket，> 300s，系统将自动启用 HTTP 定时拉取
   slow_threshold: 3000     # 响应时间超过3000ms视为缓慢
   api_token: "test-token-for-api-auth"  # API访问令牌
   
@@ -14,6 +14,10 @@ server:
     # 2. 本地图片: "/custom/logo.png", "/custom/my-icon.svg" (需放在 ./data/public/ 目录下)
     # 3. 网络图片: "https://example.com/logo.png"
     # 4. Base64图片: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA..."
+    # 
+    # 提示：Font Awesome 5 图标请注意前缀：
+    # * 品牌图标（如 Docker, GitHub, 微信）：使用 **fab** (例如 fab fa-weixin)
+    # * 常规图标（如 首页, 设置）：使用 **fas** (例如 fas fa-home)
     title: "容器镜像加速器监控"      # 页面主标题
     description: "实时监控多种容器镜像源的加速器状态，帮助开发者选择最佳的镜像源"  # 页面描述
     browser_title: "容器镜像监控"   # 浏览器标签页标题
@@ -80,8 +84,8 @@ server:
     copyright: ""          # 版权信息，如 © 2024 Your Company
     enable_html: false     # 是否启用HTML渲染（text和copyright字段支持HTML）
     links:                 # 自定义链接
-      # - name: "GitHub"
-      #   url: "https://github.com/xxx"
+       - name: "GitHub"
+         url: "https://github.com/okxlin/docker-mirror-monitor"
   
   # 标签颜色配置 (keyword匹配不区分大小写，按顺序优先匹配)
   tag_colors:
@@ -187,17 +191,17 @@ server:
       # 捐赠方式列表
       items: []
         # - name: "微信支付"
-        #   icon: "fa-weixin"         # Font Awesome 图标类名
+        #   icon: "fab fa-weixin"     # 品牌图标使用 fab
         #   qrcode: ""                # 二维码图片URL或base64
         #   color: "#07c160"
         # - name: "支付宝"
-        #   icon: "fa-credit-card"
+        #   icon: "fab fa-alipay"     # 支付宝也有专门的图标
         #   qrcode: ""
         #   color: "#1677ff"
     
-    # 广告/推广配置
-    ads:
-      enabled: false                 # 是否显示广告
+    # 合作伙伴/推广配置
+    partners:
+      enabled: false                 # 是否显示推荐/合作伙伴
       items: []
         # - title: "推荐服务"
         #   description: "优质的云服务提供商"
@@ -209,10 +213,10 @@ server:
     links:
       # - name: "GitHub"
       #   url: "https://github.com/xxx"
-      #   icon: "fa-github"
+      #   icon: "fab fa-github"       # 品牌图标使用 fab
       # - name: "文档"
       #   url: "https://docs.example.com"
-      #   icon: "fa-book"
+      #   icon: "fas fa-book"         # 通用图标使用 fas
     
     # 免责声明配置
     disclaimer:
@@ -343,10 +347,6 @@ groups:
       - name: "飞牛NAS"
         url: "https://docker.fnnas.com/v2/"
         tags: ["飞牛NAS", "Nginx", "需登陆"]
-
-      - name: "阿里云镜像"
-        url: "https://registry.cn-hangzhou.aliyuncs.com/v2/"
-        tags: ["阿里云", "需配置"]
 
   # GHCR 镜像源
   - id: "ghcr"
