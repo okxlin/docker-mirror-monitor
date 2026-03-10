@@ -13,14 +13,11 @@ env:
   GO_VERSION: '1.24.12'
 
 jobs:
-  # Job 1: 手动触发时构建二进制文件并创建Release
-  build-and-release:
-    name: Build Binaries and Create Release
+  # Job 1: 手动触发时构建二进制文件并上传制品
+  build-binaries:
+    name: Build Binaries
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch'
-    
-    permissions:
-      contents: write
     
     strategy:
       matrix:
@@ -85,12 +82,39 @@ jobs:
           printf "# Version: %s\n" "${VERSION}" > ${OUTPUT_NAME}.sha256
           sha256sum ${OUTPUT_NAME} >> ${OUTPUT_NAME}.sha256
 
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.suffix }}
+          path: |
+            dist/${{ env.APP_NAME }}-${{ steps.version.outputs.VERSION }}-${{ matrix.suffix }}
+            dist/${{ env.APP_NAME }}-${{ steps.version.outputs.VERSION }}-${{ matrix.suffix }}.sha256
+
+  # Job 2: 汇总制品并创建Release
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    needs: build-binaries
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ github.event.inputs.version }}
+
+    steps:
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.VERSION }}
-          name: Release ${{ steps.version.outputs.VERSION }}
+          tag_name: ${{ env.VERSION }}
+          name: Release ${{ env.VERSION }}
           body: |
+            <p><strong>Checksum note:</strong> Each <code>.sha256</code> file includes a first-line version header (e.g., <code># Version: v1.1.1</code>).</p>
             <table>
               <thead>
                 <tr>
@@ -104,50 +128,50 @@ jobs:
                 <tr>
                   <td><img src="https://img.shields.io/badge/ARCH-amd64-2ea44f?style=flat" /></td>
                   <td><img src="https://img.shields.io/badge/OS-Linux-fabd14?style=flat" /></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/${{ env.APP_NAME }}-${{ steps.version.outputs.VERSION }}-linux-amd64">Download</a></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/${{ env.APP_NAME }}-${{ steps.version.outputs.VERSION }}-linux-amd64.sha256">SHA256</a></td>
+                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-linux-amd64">Download</a></td>
+                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-linux-amd64.sha256">SHA256</a></td>
                 </tr>
                 <tr>
                   <td><img src="https://img.shields.io/badge/ARCH-arm64-1f6feb?style=flat" /></td>
                   <td><img src="https://img.shields.io/badge/OS-Linux-fabd14?style=flat" /></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/${{ env.APP_NAME }}-${{ steps.version.outputs.VERSION }}-linux-arm64">Download</a></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/${{ env.APP_NAME }}-${{ steps.version.outputs.VERSION }}-linux-arm64.sha256">SHA256</a></td>
+                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-linux-arm64">Download</a></td>
+                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-linux-arm64.sha256">SHA256</a></td>
                 </tr>
                 <tr>
                   <td><img src="https://img.shields.io/badge/ARCH-armv7-1f6feb?style=flat" /></td>
                   <td><img src="https://img.shields.io/badge/OS-Linux-fabd14?style=flat" /></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/${{ env.APP_NAME }}-${{ steps.version.outputs.VERSION }}-linux-armv7">Download</a></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/${{ env.APP_NAME }}-${{ steps.version.outputs.VERSION }}-linux-armv7.sha256">SHA256</a></td>
+                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-linux-armv7">Download</a></td>
+                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-linux-armv7.sha256">SHA256</a></td>
                 </tr>
                 <tr>
                   <td><img src="https://img.shields.io/badge/ARCH-ppc64le-8b5cf6?style=flat" /></td>
                   <td><img src="https://img.shields.io/badge/OS-Linux-fabd14?style=flat" /></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/${{ env.APP_NAME }}-${{ steps.version.outputs.VERSION }}-linux-ppc64le">Download</a></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/${{ env.APP_NAME }}-${{ steps.version.outputs.VERSION }}-linux-ppc64le.sha256">SHA256</a></td>
+                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-linux-ppc64le">Download</a></td>
+                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-linux-ppc64le.sha256">SHA256</a></td>
                 </tr>
                 <tr>
                   <td><img src="https://img.shields.io/badge/ARCH-s390x-8b5cf6?style=flat" /></td>
                   <td><img src="https://img.shields.io/badge/OS-Linux-fabd14?style=flat" /></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/${{ env.APP_NAME }}-${{ steps.version.outputs.VERSION }}-linux-s390x">Download</a></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/${{ env.APP_NAME }}-${{ steps.version.outputs.VERSION }}-linux-s390x.sha256">SHA256</a></td>
+                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-linux-s390x">Download</a></td>
+                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-linux-s390x.sha256">SHA256</a></td>
                 </tr>
                 <tr>
                   <td><img src="https://img.shields.io/badge/ARCH-amd64-2ea44f?style=flat" /></td>
                   <td><img src="https://img.shields.io/badge/OS-Windows-0078d4?style=flat" /></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/${{ env.APP_NAME }}-${{ steps.version.outputs.VERSION }}-windows-amd64.exe">Download</a></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/${{ env.APP_NAME }}-${{ steps.version.outputs.VERSION }}-windows-amd64.exe.sha256">SHA256</a></td>
+                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-windows-amd64.exe">Download</a></td>
+                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-windows-amd64.exe.sha256">SHA256</a></td>
                 </tr>
                 <tr>
                   <td><img src="https://img.shields.io/badge/ARCH-amd64-2ea44f?style=flat" /></td>
                   <td><img src="https://img.shields.io/badge/OS-macOS-000000?style=flat" /></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/${{ env.APP_NAME }}-${{ steps.version.outputs.VERSION }}-darwin-amd64">Download</a></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/${{ env.APP_NAME }}-${{ steps.version.outputs.VERSION }}-darwin-amd64.sha256">SHA256</a></td>
+                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-darwin-amd64">Download</a></td>
+                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-darwin-amd64.sha256">SHA256</a></td>
                 </tr>
                 <tr>
                   <td><img src="https://img.shields.io/badge/ARCH-arm64-1f6feb?style=flat" /></td>
                   <td><img src="https://img.shields.io/badge/OS-macOS-000000?style=flat" /></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/${{ env.APP_NAME }}-${{ steps.version.outputs.VERSION }}-darwin-arm64">Download</a></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.VERSION }}/${{ env.APP_NAME }}-${{ steps.version.outputs.VERSION }}-darwin-arm64.sha256">SHA256</a></td>
+                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-darwin-arm64">Download</a></td>
+                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-darwin-arm64.sha256">SHA256</a></td>
                 </tr>
               </tbody>
             </table>
