@@ -153,7 +153,7 @@ type Group struct {
 type Config struct {
 	Server struct {
 		Listen                string              `yaml:"listen"`
-		Debug                 bool                `yaml:"debug"`                 // 调试模式：false=只显示错误/启动信息，true=显示所有连接日志
+		Debug                 bool                `yaml:"debug"` // 调试模式：false=只显示错误/启动信息，true=显示所有连接日志
 		RefreshInterval       time.Duration       `yaml:"refresh_interval"`
 		SlowThreshold         int64               `yaml:"slow_threshold"`
 		Proxy                 string              `yaml:"proxy"`
@@ -504,7 +504,7 @@ func (m *Monitor) Probe(target Target) *Result {
 	m.mu.RLock()
 	slowThreshold := m.config.Server.SlowThreshold
 	m.mu.RUnlock()
-	
+
 	if slowThreshold <= 0 {
 		slowThreshold = 3000 // 默认值
 	}
@@ -626,7 +626,7 @@ func (m *Monitor) Start(ctx context.Context) {
 			jitterMax = 1000
 		}
 		randomDelay := time.Duration(rand.Int63n(jitterMax))
-		
+
 		nextRunTime := baseInterval + randomDelay
 
 		timer := time.NewTimer(nextRunTime)
@@ -2587,9 +2587,14 @@ const htmlTemplate = `<!DOCTYPE html>
             const groupEl = document.getElementById('group-' + groupId);
             if (!groupEl) return [];
             const selected = [];
+            const seenUrls = new Set();
             groupEl.querySelectorAll('.mirror-option').forEach(opt => {
                 if (opt.querySelector('.mirror-checkbox').checked) {
-                    selected.push(opt.dataset.url);
+                    const url = opt.dataset.url;
+                    if (!seenUrls.has(url)) {
+                        seenUrls.add(url);
+                        selected.push(url);
+                    }
                 }
             });
             return selected;
@@ -3161,9 +3166,9 @@ func main() {
 
 		// 2. 设置读取超时 (防僵尸连接)
 		conn.SetReadDeadline(time.Now().Add(pongWait))
-		conn.SetPongHandler(func(string) error { 
+		conn.SetPongHandler(func(string) error {
 			conn.SetReadDeadline(time.Now().Add(pongWait))
-			return nil 
+			return nil
 		})
 
 		hub.register <- conn
@@ -3174,7 +3179,7 @@ func main() {
 			Groups:    groupStatuses,
 			CheckedAt: time.Now().Format("2006-01-02 15:04:05"),
 		}
-		
+
 		// 写入也要加超时
 		conn.SetWriteDeadline(time.Now().Add(writeWait))
 		if err := conn.WriteJSON(update); err != nil {
@@ -3301,7 +3306,7 @@ func main() {
 	// 定义生产级 Server 配置
 	srv := &http.Server{
 		Addr:              config.Server.Listen,
-		Handler:           nil, // 使用默认路由
+		Handler:           nil,              // 使用默认路由
 		ErrorLog:          serverErrorLog,   // 接管内部错误日志
 		ReadHeaderTimeout: 5 * time.Second,  // 防止 Slowloris 攻击
 		ReadTimeout:       15 * time.Second, // 防止读取主体过慢
