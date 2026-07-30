@@ -123,4 +123,5 @@ jobs:
           generate_release_notes: true
           files: dist/*
           fail_on_unmatched_files: true
-          make_latest: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ !contains(github.ref_name, '-') }}

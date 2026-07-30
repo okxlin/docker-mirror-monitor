@@ -671,8 +671,10 @@ git push origin v1.0.0
 # 3. GitHub Actions 自动执行：
 #    - 编译 8 个平台的二进制文件
 #    - 创建 GitHub Release 并上传文件
-#    - 构建并推送 Docker 多架构镜像到 GHCR
+#    - Trivy 扫描通过后，将多架构镜像推送到 GHCR 和 Docker Hub
 ```
+
+默认分支还会在每周一 03:17 UTC 重新构建并扫描 `latest` 镜像，以纳入 Alpine 软件包安全更新。Dependabot 每周检查 Go 模块、Docker 基础镜像 digest 和 GitHub Actions；依赖更新仍需通过 CI 后再合并。
 
 ### 生成的产物
 
@@ -680,14 +682,14 @@ git push origin v1.0.0
 
 | 文件名 | 平台 |
 |--------|------|
-| `docker-mirror-monitor-linux-amd64` | Linux x86_64 |
-| `docker-mirror-monitor-linux-arm64` | Linux ARM64 |
-| `docker-mirror-monitor-linux-armv7` | Linux ARMv7 |
-| `docker-mirror-monitor-linux-ppc64le` | Linux PowerPC 64 LE |
-| `docker-mirror-monitor-linux-s390x` | Linux IBM Z |
-| `docker-mirror-monitor-windows-amd64.exe` | Windows x64 |
-| `docker-mirror-monitor-darwin-amd64` | macOS Intel |
-| `docker-mirror-monitor-darwin-arm64` | macOS Apple Silicon |
+| `docker-mirror-monitor-<version>-linux-amd64` | Linux x86_64 |
+| `docker-mirror-monitor-<version>-linux-arm64` | Linux ARM64 |
+| `docker-mirror-monitor-<version>-linux-armv7` | Linux ARMv7 |
+| `docker-mirror-monitor-<version>-linux-ppc64le` | Linux PowerPC 64 LE |
+| `docker-mirror-monitor-<version>-linux-s390x` | Linux IBM Z |
+| `docker-mirror-monitor-<version>-windows-amd64.exe` | Windows x64 |
+| `docker-mirror-monitor-<version>-darwin-amd64` | macOS Intel |
+| `docker-mirror-monitor-<version>-darwin-arm64` | macOS Apple Silicon |
 
 每个文件附带 `.sha256` 校验文件。
 
@@ -695,23 +697,23 @@ git push origin v1.0.0
 
 ```bash
 # 拉取最新版本
-docker pull ghcr.io/your-username/your-repo:latest
+docker pull ghcr.io/okxlin/docker-mirror-monitor:latest
 
 # 拉取指定版本
-docker pull ghcr.io/your-username/your-repo:1.0.0
+docker pull ghcr.io/okxlin/docker-mirror-monitor:1.1.2
 
 # 支持架构：linux/amd64, linux/arm64, linux/arm/v7, linux/ppc64le, linux/s390x
 ```
 
 ### 自定义 Docker 镜像仓库
 
-如需推送到其他仓库（如 Docker Hub、阿里云），修改 `.github/workflows/release.yml`：
+如需推送到其他仓库（如阿里云），修改 `.github/workflows/build-docker-image.yml`：
 
 ```yaml
 # 添加额外的镜像仓库
 - name: Docker meta
   id: meta
-  uses: docker/metadata-action@v5
+  uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
   with:
     images: |
       ghcr.io/${{ github.repository }}
@@ -720,13 +722,13 @@ docker pull ghcr.io/your-username/your-repo:1.0.0
 
 # 添加对应的登录步骤
 - name: Login to Docker Hub
-  uses: docker/login-action@v3
+  uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
   with:
     username: ${{ secrets.DOCKERHUB_USERNAME }}
-    password: ${{ secrets.DOCKERHUB_TOKEN }}
+    password: ${{ secrets.DOCKERHUB_PASSWORD }}
 
 - name: Login to Aliyun
-  uses: docker/login-action@v3
+  uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
   with:
     registry: registry.cn-hangzhou.aliyuncs.com
     username: ${{ secrets.ALIYUN_USERNAME }}
@@ -738,8 +740,8 @@ docker pull ghcr.io/your-username/your-repo:1.0.0
 | Secret 名称 | 说明 |
 |-------------|------|
 | `GITHUB_TOKEN` | 自动提供，无需配置 |
-| `DOCKERHUB_USERNAME` | Docker Hub 用户名（可选）|
-| `DOCKERHUB_TOKEN` | Docker Hub Access Token（可选）|
+| `DOCKERHUB_USERNAME` | Docker Hub 用户名 |
+| `DOCKERHUB_PASSWORD` | Docker Hub Access Token |
 | `ALIYUN_USERNAME` | 阿里云容器镜像服务用户名（可选）|
 | `ALIYUN_PASSWORD` | 阿里云容器镜像服务密码（可选）|
 
