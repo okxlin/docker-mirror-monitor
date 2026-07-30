@@ -1,25 +1,29 @@
 name: Release Binaries
 
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: 'Version tag (e.g., v1.0.0)'
-        required: true
-        default: 'v1.0.0'
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   APP_NAME: docker-mirror-monitor
-  GO_VERSION: '1.24.12'
 
 jobs:
-  # Job 1: 手动触发时构建二进制文件并上传制品
   build-binaries:
-    name: Build Binaries
+    name: Build ${{ matrix.suffix }}
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch'
-    
+    env:
+      VERSION: ${{ github.ref_name }}
+
     strategy:
+      fail-fast: false
       matrix:
         include:
           - goos: linux
@@ -30,7 +34,7 @@ jobs:
             suffix: linux-arm64
           - goos: linux
             goarch: arm
-            goarm: 7
+            goarm: '7'
             suffix: linux-armv7
           - goos: linux
             goarch: ppc64le
@@ -49,134 +53,75 @@ jobs:
             suffix: darwin-arm64
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
           cache: true
           cache-dependency-path: go.sum
 
-      - name: Get version from input
-        id: version
-        run: echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+      - name: Validate release tag
+        shell: bash
+        run: |
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            printf 'Invalid release tag: %s\n' "$VERSION" >&2
+            exit 1
+          fi
 
-      - name: Build binaries
+      - name: Build binary and checksum
+        shell: bash
         env:
-          CGO_ENABLED: 0
+          CGO_ENABLED: '0'
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm }}
+          SUFFIX: ${{ matrix.suffix }}
         run: |
-          VERSION=${{ steps.version.outputs.VERSION }}
-          BUILD_TIME=$(date +%Y%m%d%H%M%S)
-          LDFLAGS="-s -w -X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME}"
-          
-          OUTPUT_NAME="${{ env.APP_NAME }}-${VERSION}-${{ matrix.suffix }}"
-          go build -ldflags="${LDFLAGS}" -o "dist/${OUTPUT_NAME}" main.go
-          
-          # Create checksum
+          BUILD_TIME=$(date -u +%Y%m%d%H%M%S)
+          OUTPUT_NAME="${APP_NAME}-${VERSION}-${SUFFIX}"
+          mkdir -p dist
+          go build \
+            -trimpath \
+            -ldflags="-s -w -X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME}" \
+            -o "dist/${OUTPUT_NAME}" \
+            ./main.go
           cd dist
-          printf "# Version: %s\n" "${VERSION}" > ${OUTPUT_NAME}.sha256
-          sha256sum ${OUTPUT_NAME} >> ${OUTPUT_NAME}.sha256
+          sha256sum "$OUTPUT_NAME" > "${OUTPUT_NAME}.sha256"
 
-      - name: Upload binaries
-        uses: actions/upload-artifact@v4
+      - name: Upload binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: binaries-${{ matrix.suffix }}
           path: |
-            dist/${{ env.APP_NAME }}-${{ steps.version.outputs.VERSION }}-${{ matrix.suffix }}
-            dist/${{ env.APP_NAME }}-${{ steps.version.outputs.VERSION }}-${{ matrix.suffix }}.sha256
+            dist/${{ env.APP_NAME }}-${{ env.VERSION }}-${{ matrix.suffix }}
+            dist/${{ env.APP_NAME }}-${{ env.VERSION }}-${{ matrix.suffix }}.sha256
+          if-no-files-found: error
+          retention-days: 7
 
-  # Job 2: 汇总制品并创建Release
   create-release:
-    name: Create Release
+    name: Create GitHub Release
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch'
     needs: build-binaries
     permissions:
       contents: write
-    env:
-      VERSION: ${{ github.event.inputs.version }}
 
     steps:
       - name: Download binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
           merge-multiple: true
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+      - name: Create release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
-          tag_name: ${{ env.VERSION }}
-          name: Release ${{ env.VERSION }}
-          body: |
-            <p><strong>Checksum note:</strong> Each <code>.sha256</code> file includes a first-line version header (e.g., <code># Version: v1.1.1</code>).</p>
-            <table>
-              <thead>
-                <tr>
-                  <th>Architecture</th>
-                  <th>OS</th>
-                  <th>Download</th>
-                  <th>SHA256</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td><img src="https://img.shields.io/badge/ARCH-amd64-2ea44f?style=flat" /></td>
-                  <td><img src="https://img.shields.io/badge/OS-Linux-fabd14?style=flat" /></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-linux-amd64">Download</a></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-linux-amd64.sha256">SHA256</a></td>
-                </tr>
-                <tr>
-                  <td><img src="https://img.shields.io/badge/ARCH-arm64-1f6feb?style=flat" /></td>
-                  <td><img src="https://img.shields.io/badge/OS-Linux-fabd14?style=flat" /></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-linux-arm64">Download</a></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-linux-arm64.sha256">SHA256</a></td>
-                </tr>
-                <tr>
-                  <td><img src="https://img.shields.io/badge/ARCH-armv7-1f6feb?style=flat" /></td>
-                  <td><img src="https://img.shields.io/badge/OS-Linux-fabd14?style=flat" /></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-linux-armv7">Download</a></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-linux-armv7.sha256">SHA256</a></td>
-                </tr>
-                <tr>
-                  <td><img src="https://img.shields.io/badge/ARCH-ppc64le-8b5cf6?style=flat" /></td>
-                  <td><img src="https://img.shields.io/badge/OS-Linux-fabd14?style=flat" /></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-linux-ppc64le">Download</a></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-linux-ppc64le.sha256">SHA256</a></td>
-                </tr>
-                <tr>
-                  <td><img src="https://img.shields.io/badge/ARCH-s390x-8b5cf6?style=flat" /></td>
-                  <td><img src="https://img.shields.io/badge/OS-Linux-fabd14?style=flat" /></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-linux-s390x">Download</a></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-linux-s390x.sha256">SHA256</a></td>
-                </tr>
-                <tr>
-                  <td><img src="https://img.shields.io/badge/ARCH-amd64-2ea44f?style=flat" /></td>
-                  <td><img src="https://img.shields.io/badge/OS-Windows-0078d4?style=flat" /></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-windows-amd64.exe">Download</a></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-windows-amd64.exe.sha256">SHA256</a></td>
-                </tr>
-                <tr>
-                  <td><img src="https://img.shields.io/badge/ARCH-amd64-2ea44f?style=flat" /></td>
-                  <td><img src="https://img.shields.io/badge/OS-macOS-000000?style=flat" /></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-darwin-amd64">Download</a></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-darwin-amd64.sha256">SHA256</a></td>
-                </tr>
-                <tr>
-                  <td><img src="https://img.shields.io/badge/ARCH-arm64-1f6feb?style=flat" /></td>
-                  <td><img src="https://img.shields.io/badge/OS-macOS-000000?style=flat" /></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-darwin-arm64">Download</a></td>
-                  <td><a href="https://github.com/${{ github.repository }}/releases/download/${{ env.VERSION }}/${{ env.APP_NAME }}-${{ env.VERSION }}-darwin-arm64.sha256">SHA256</a></td>
-                </tr>
-              </tbody>
-            </table>
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          generate_release_notes: true
           files: dist/*
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          fail_on_unmatched_files: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ !contains(github.ref_name, '-') }}

@@ -1,89 +1,96 @@
 name: Build and Push Docker Image
 
 on:
-  # 1. 自动触发：当发布新 Release 时
-  release:
-    types: [published]
-
-  # 2. 手动触发：在 Actions 页面手动点击运行
+  push:
+    tags:
+      - 'v*'
+  schedule:
+    - cron: '17 3 * * 1'
   workflow_dispatch:
-    inputs:
-      version_tag:
-        description: 'Tag name (e.g. v1.0.0)'
-        required: true
-        default: 'dev'
-      make_latest:
-        description: 'Also tag as "latest"? (同时打上latest标签?)'
-        type: boolean
-        required: true
-        default: false
 
 permissions:
   contents: read
-  packages: write # 允许推送到 GHCR
+  packages: write
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  build-and-push:
-    name: Build and Push
+  build-scan-push:
+    name: Scan and publish multi-arch image
     runs-on: ubuntu-latest
-    
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
+      - name: Build amd64 image for security gate
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          load: true
+          pull: true
+          no-cache: ${{ github.event_name == 'schedule' }}
+          tags: local/docker-mirror-monitor:scan
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.72.0
+          scan-type: image
+          image-ref: local/docker-mirror-monitor:scan
+          scanners: vuln
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: '1'
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GPR_TOKEN }}
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
 
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
+      - name: Log in to Docker Hub
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_PASSWORD }}
 
-      # --- 核心逻辑：标签生成规则 ---
-      - name: Extract Docker metadata
+      - name: Extract image metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: |
-            ghcr.io/${{ github.repository_owner }}/docker-mirror-monitor
+            ghcr.io/${{ github.repository }}
             ${{ secrets.DOCKERHUB_USERNAME }}/docker-mirror-monitor
-          
           tags: |
-            # 规则 1: Release 事件 -> 自动生成语义化版本 (v1, v1.0, v1.0.0)
-            type=semver,pattern={{version}},enable=${{ github.event_name == 'release' }}
-            
-            # 规则 2: Release 事件 -> 强制打 latest
-            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
-            
-            # 规则 3: 手动触发 -> 使用输入的 version_tag (例如 v1.0.1-fix)
-            type=raw,value=${{ inputs.version_tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
-            
-            # 规则 4: 手动触发 -> 如果勾选了 make_latest，额外打 latest
-            type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' && inputs.make_latest == true }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest
 
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/ppc64le,linux/s390x
           push: true
+          pull: true
+          no-cache: ${{ github.event_name == 'schedule' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

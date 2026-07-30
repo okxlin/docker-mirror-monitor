@@ -60,11 +60,13 @@
 docker pull moelin/docker-mirror-monitor:latest
 
 # 运行（使用默认配置）
-docker run -d -p 9080:9080 docker-mirror-monitor:latest
+docker run -d -p 9080:9080 moelin/docker-mirror-monitor:latest
 
 # 运行（使用自定义配置）
+export DMM_API_TOKEN='replace-with-a-long-random-token'
 docker run -d \
   -p 9080:9080 \
+  -e DMM_API_TOKEN \
   -v $(pwd)/config.yaml:/app/data/config.yaml \
   -v $(pwd)/data:/app/data \
   moelin/docker-mirror-monitor:latest
@@ -77,6 +79,8 @@ services:
     image: moelin/docker-mirror-monitor:latest
     ports:
       - "9080:9080"
+    environment:
+      - DMM_API_TOKEN
     volumes:
       # 挂载配置文件
       - ./config.yaml:/app/data/config.yaml
@@ -483,7 +487,7 @@ groups:
 
 ### 环境要求
 
-- Go 1.22+
+- Go 1.26.5+
 - Docker 20.10+
 - Docker Buildx（多架构编译）
 
@@ -503,11 +507,11 @@ docker images | grep docker-mirror-monitor
 **Dockerfile 说明：**
 
 ```dockerfile
-# 构建阶段 - 使用 golang:1.24.12-alpine 作为编译环境
-FROM --platform=$BUILDPLATFORM golang:1.24.12-alpine AS builder
+# 构建阶段 - 固定 Go 1.26.5 / Alpine 3.24 多架构镜像
+FROM --platform=$BUILDPLATFORM golang:1.26.5-alpine3.24@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS builder
 
-# 运行阶段 - 使用精简的 alpine 镜像
-FROM alpine:3.18
+# 运行阶段 - 固定 Alpine 3.24 多架构镜像
+FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 # 安装 ca-certificates（HTTPS支持）和 tzdata（时区支持）
 # 默认时区设置为 Asia/Shanghai
 ```
@@ -667,8 +671,10 @@ git push origin v1.0.0
 # 3. GitHub Actions 自动执行：
 #    - 编译 8 个平台的二进制文件
 #    - 创建 GitHub Release 并上传文件
-#    - 构建并推送 Docker 多架构镜像到 GHCR
+#    - Trivy 扫描通过后，将多架构镜像推送到 GHCR 和 Docker Hub
 ```
+
+默认分支还会在每周一 03:17 UTC 重新构建并扫描 `latest` 镜像，以纳入 Alpine 软件包安全更新。Dependabot 每周检查 Go 模块、Docker 基础镜像 digest 和 GitHub Actions；依赖更新仍需通过 CI 后再合并。
 
 ### 生成的产物
 
@@ -676,14 +682,14 @@ git push origin v1.0.0
 
 | 文件名 | 平台 |
 |--------|------|
-| `docker-mirror-monitor-linux-amd64` | Linux x86_64 |
-| `docker-mirror-monitor-linux-arm64` | Linux ARM64 |
-| `docker-mirror-monitor-linux-armv7` | Linux ARMv7 |
-| `docker-mirror-monitor-linux-ppc64le` | Linux PowerPC 64 LE |
-| `docker-mirror-monitor-linux-s390x` | Linux IBM Z |
-| `docker-mirror-monitor-windows-amd64.exe` | Windows x64 |
-| `docker-mirror-monitor-darwin-amd64` | macOS Intel |
-| `docker-mirror-monitor-darwin-arm64` | macOS Apple Silicon |
+| `docker-mirror-monitor-<version>-linux-amd64` | Linux x86_64 |
+| `docker-mirror-monitor-<version>-linux-arm64` | Linux ARM64 |
+| `docker-mirror-monitor-<version>-linux-armv7` | Linux ARMv7 |
+| `docker-mirror-monitor-<version>-linux-ppc64le` | Linux PowerPC 64 LE |
+| `docker-mirror-monitor-<version>-linux-s390x` | Linux IBM Z |
+| `docker-mirror-monitor-<version>-windows-amd64.exe` | Windows x64 |
+| `docker-mirror-monitor-<version>-darwin-amd64` | macOS Intel |
+| `docker-mirror-monitor-<version>-darwin-arm64` | macOS Apple Silicon |
 
 每个文件附带 `.sha256` 校验文件。
 
@@ -691,23 +697,23 @@ git push origin v1.0.0
 
 ```bash
 # 拉取最新版本
-docker pull ghcr.io/your-username/your-repo:latest
+docker pull ghcr.io/okxlin/docker-mirror-monitor:latest
 
 # 拉取指定版本
-docker pull ghcr.io/your-username/your-repo:1.0.0
+docker pull ghcr.io/okxlin/docker-mirror-monitor:1.1.2
 
 # 支持架构：linux/amd64, linux/arm64, linux/arm/v7, linux/ppc64le, linux/s390x
 ```
 
 ### 自定义 Docker 镜像仓库
 
-如需推送到其他仓库（如 Docker Hub、阿里云），修改 `.github/workflows/release.yml`：
+如需推送到其他仓库（如阿里云），修改 `.github/workflows/build-docker-image.yml`：
 
 ```yaml
 # 添加额外的镜像仓库
 - name: Docker meta
   id: meta
-  uses: docker/metadata-action@v5
+  uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
   with:
     images: |
       ghcr.io/${{ github.repository }}
@@ -716,13 +722,13 @@ docker pull ghcr.io/your-username/your-repo:1.0.0
 
 # 添加对应的登录步骤
 - name: Login to Docker Hub
-  uses: docker/login-action@v3
+  uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
   with:
     username: ${{ secrets.DOCKERHUB_USERNAME }}
-    password: ${{ secrets.DOCKERHUB_TOKEN }}
+    password: ${{ secrets.DOCKERHUB_PASSWORD }}
 
 - name: Login to Aliyun
-  uses: docker/login-action@v3
+  uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
   with:
     registry: registry.cn-hangzhou.aliyuncs.com
     username: ${{ secrets.ALIYUN_USERNAME }}
@@ -734,8 +740,8 @@ docker pull ghcr.io/your-username/your-repo:1.0.0
 | Secret 名称 | 说明 |
 |-------------|------|
 | `GITHUB_TOKEN` | 自动提供，无需配置 |
-| `DOCKERHUB_USERNAME` | Docker Hub 用户名（可选）|
-| `DOCKERHUB_TOKEN` | Docker Hub Access Token（可选）|
+| `DOCKERHUB_USERNAME` | Docker Hub 用户名 |
+| `DOCKERHUB_PASSWORD` | Docker Hub Access Token |
 | `ALIYUN_USERNAME` | 阿里云容器镜像服务用户名（可选）|
 | `ALIYUN_PASSWORD` | 阿里云容器镜像服务密码（可选）|
 
@@ -879,14 +885,13 @@ server {
 
 ## 配置热加载
 
-修改 `config.yaml` 后，无需重启服务，调用 API 即可热加载：
+修改 `config.yaml` 后，可调用 API 热加载。默认令牌为空，此时接口禁用；建议通过 `DMM_API_TOKEN` 环境变量设置令牌，避免把凭据提交到配置文件。
 
 ```bash
-# 热加载配置 (需要携带配置文件中定义的 api_token)
-curl -X POST "http://localhost:9080/api/reload?token=test-token-for-api-auth"
-
-# 或者使用 Header 方式：
-# curl -H "Authorization: test-token-for-api-auth" -X POST http://localhost:9080/api/reload
+# 仅接受 Bearer Header，不接受 URL 查询参数中的令牌
+curl -X POST \
+  -H "Authorization: Bearer ${DMM_API_TOKEN}" \
+  http://localhost:9080/api/reload
 
 # 成功响应
 {"success":true,"message":"配置重载成功，正在重新探测"}

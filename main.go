@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"encoding/json"
 	"flag"
@@ -22,6 +24,8 @@ import (
 	"golang.org/x/net/proxy"
 	"gopkg.in/yaml.v3"
 )
+
+const apiTokenEnv = "DMM_API_TOKEN"
 
 // TagColor 标签颜色配置
 type TagColor struct {
@@ -215,64 +219,71 @@ type StatusUpdate struct {
 	CheckedAt string        `json:"checked_at"`
 }
 
+const maxProbeConcurrency = 16
+
+type websocketClient struct {
+	hub  *Hub
+	conn *websocket.Conn
+	send chan *StatusUpdate
+}
+
 // Hub WebSocket连接管理
 type Hub struct {
-	clients    map[*websocket.Conn]bool
+	clients    map[*websocketClient]bool
 	broadcast  chan *StatusUpdate
-	register   chan *websocket.Conn
-	unregister chan *websocket.Conn
+	register   chan *websocketClient
+	unregister chan *websocketClient
 	mu         sync.RWMutex
 }
 
 func NewHub() *Hub {
 	return &Hub{
-		clients:    make(map[*websocket.Conn]bool),
+		clients:    make(map[*websocketClient]bool),
 		broadcast:  make(chan *StatusUpdate),
-		register:   make(chan *websocket.Conn),
-		unregister: make(chan *websocket.Conn),
+		register:   make(chan *websocketClient),
+		unregister: make(chan *websocketClient),
 	}
 }
 
 func (h *Hub) Run() {
 	for {
 		select {
-		case conn := <-h.register:
+		case client := <-h.register:
 			h.mu.Lock()
-			h.clients[conn] = true
+			h.clients[client] = true
 			clientCount := len(h.clients)
 			h.mu.Unlock()
 			logDebug("WebSocket客户端连接, 当前连接数: %d", clientCount)
 
-		case conn := <-h.unregister:
+		case client := <-h.unregister:
 			h.mu.Lock()
-			if _, ok := h.clients[conn]; ok {
-				delete(h.clients, conn)
-				conn.Close()
+			if _, ok := h.clients[client]; ok {
+				delete(h.clients, client)
+				close(client.send)
+				client.conn.Close()
 			}
 			clientCount := len(h.clients)
 			h.mu.Unlock()
 			logDebug("WebSocket客户端断开, 当前连接数: %d", clientCount)
 
 		case update := <-h.broadcast:
-			// 收集失败的连接，避免在遍历时修改map
-			var failedConns []*websocket.Conn
+			var slowClients []*websocketClient
 			h.mu.RLock()
-			for conn := range h.clients {
-				// 设置写入超时，防止慢客户端阻塞 Hub
-				conn.SetWriteDeadline(time.Now().Add(writeWait))
-				err := conn.WriteJSON(update)
-				if err != nil {
-					failedConns = append(failedConns, conn)
+			for client := range h.clients {
+				select {
+				case client.send <- update:
+				default:
+					slowClients = append(slowClients, client)
 				}
 			}
 			h.mu.RUnlock()
 
-			// 统一处理失败的连接
-			for _, conn := range failedConns {
+			for _, client := range slowClients {
 				h.mu.Lock()
-				if _, ok := h.clients[conn]; ok {
-					delete(h.clients, conn)
-					conn.Close()
+				if _, ok := h.clients[client]; ok {
+					delete(h.clients, client)
+					close(client.send)
+					client.conn.Close()
 				}
 				h.mu.Unlock()
 			}
@@ -287,14 +298,70 @@ func (h *Hub) Broadcast(update *StatusUpdate) {
 	}
 }
 
+func (c *websocketClient) writePump() {
+	ticker := time.NewTicker(pingPeriod)
+	defer func() {
+		ticker.Stop()
+		c.hub.unregister <- c
+		c.conn.Close()
+	}()
+
+	for {
+		select {
+		case update, ok := <-c.send:
+			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if !ok {
+				_ = c.conn.WriteMessage(websocket.CloseMessage, nil)
+				return
+			}
+			if err := c.conn.WriteJSON(update); err != nil {
+				return
+			}
+		case <-ticker.C:
+			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func (c *websocketClient) readPump() {
+	defer func() {
+		c.hub.unregister <- c
+		c.conn.Close()
+	}()
+
+	c.conn.SetReadLimit(maxMessageSize)
+	c.conn.SetReadDeadline(time.Now().Add(pongWait))
+	c.conn.SetPongHandler(func(string) error {
+		c.conn.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
+
+	for {
+		if _, _, err := c.conn.ReadMessage(); err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				logDebug("WebSocket连接异常关闭: %v", err)
+			}
+			return
+		}
+	}
+}
+
 // Monitor 监控器
 type Monitor struct {
-	config     *Config
-	configPath string
-	results    map[string]map[string]*Result // groupID -> targetName -> Result
-	mu         sync.RWMutex
-	hub        *Hub
-	httpClient *http.Client
+	config            *Config
+	configPath        string
+	results           map[string]map[string]*Result // groupID -> targetName -> Result
+	mu                sync.RWMutex
+	reloadMu          sync.Mutex
+	probeMu           sync.Mutex
+	probeQueueMu      sync.Mutex
+	probeQueueRunning bool
+	probeQueued       bool
+	hub               *Hub
+	httpClient        *http.Client
 }
 
 func NewMonitor(config *Config, configPath string, hub *Hub) *Monitor {
@@ -332,7 +399,7 @@ func createProxyTransport(proxyAddr string) *http.Transport {
 
 	proxyURL, err := url.Parse(proxyAddr)
 	if err != nil {
-		log.Printf("代理地址无效: %v", err)
+		log.Printf("代理地址无效")
 		return transport
 	}
 
@@ -361,7 +428,7 @@ func createProxyTransport(proxyAddr string) *http.Transport {
 	case "http", "https":
 		// HTTP/HTTPS代理
 		transport.Proxy = http.ProxyURL(proxyURL)
-		log.Printf("使用HTTP代理: %s", proxyAddr)
+		log.Printf("使用HTTP代理: %s", redactProxyAddress(proxyAddr))
 
 	default:
 		log.Printf("不支持的代理协议: %s", proxyURL.Scheme)
@@ -370,8 +437,27 @@ func createProxyTransport(proxyAddr string) *http.Transport {
 	return transport
 }
 
+func redactProxyAddress(proxyAddr string) string {
+	if proxyAddr == "" {
+		return ""
+	}
+	proxyURL, err := url.Parse(proxyAddr)
+	if err != nil || proxyURL.Scheme == "" || proxyURL.Host == "" {
+		return "<invalid>"
+	}
+	proxyURL.User = nil
+	proxyURL.Path = ""
+	proxyURL.RawPath = ""
+	proxyURL.RawQuery = ""
+	proxyURL.Fragment = ""
+	return proxyURL.String()
+}
+
 // ReloadConfig 热加载配置文件
 func (m *Monitor) ReloadConfig() error {
+	m.reloadMu.Lock()
+	defer m.reloadMu.Unlock()
+
 	newConfig, err := LoadAndValidateConfig(m.configPath)
 	if err != nil {
 		return fmt.Errorf("配置加载失败: %w", err)
@@ -390,9 +476,9 @@ func (m *Monitor) ReloadConfig() error {
 
 		// 记录变化
 		if newConfig.Server.Proxy == "" {
-			log.Printf("代理已禁用 (原代理: %s)", oldProxy)
+			log.Printf("代理已禁用 (原代理: %s)", redactProxyAddress(oldProxy))
 		} else {
-			log.Printf("代理已更新: %s (原代理: %s)", newConfig.Server.Proxy, oldProxy)
+			log.Printf("代理已更新: %s (原代理: %s)", redactProxyAddress(newConfig.Server.Proxy), redactProxyAddress(oldProxy))
 		}
 	}
 
@@ -414,13 +500,13 @@ func (m *Monitor) ReloadConfig() error {
 	}
 	m.results = newResults
 
-	log.Printf("配置热加载成功: %d 个分组, 共 %d 个监控目标", len(newConfig.Groups), m.getTotalTargets())
+	log.Printf("配置热加载成功: %d 个分组, 共 %d 个监控目标", len(newConfig.Groups), countTargets(newConfig))
 	return nil
 }
 
-func (m *Monitor) getTotalTargets() int {
+func countTargets(config *Config) int {
 	total := 0
-	for _, group := range m.config.Groups {
+	for _, group := range config.Groups {
 		total += len(group.Targets)
 	}
 	return total
@@ -531,28 +617,80 @@ func (m *Monitor) Probe(target Target) *Result {
 	return result
 }
 
-func (m *Monitor) ProbeAll() {
+func (m *Monitor) ProbeAll() bool {
+	if !m.probeMu.TryLock() {
+		return false
+	}
+	defer m.probeMu.Unlock()
+	m.probeAll()
+	return true
+}
+
+func (m *Monitor) QueueProbe() {
+	m.probeQueueMu.Lock()
+	m.probeQueued = true
+	if m.probeQueueRunning {
+		m.probeQueueMu.Unlock()
+		return
+	}
+	m.probeQueueRunning = true
+	m.probeQueueMu.Unlock()
+
+	go func() {
+		for {
+			m.probeQueueMu.Lock()
+			if !m.probeQueued {
+				m.probeQueueRunning = false
+				m.probeQueueMu.Unlock()
+				return
+			}
+			m.probeQueued = false
+			m.probeQueueMu.Unlock()
+
+			m.probeMu.Lock()
+			m.probeAll()
+			m.probeMu.Unlock()
+		}
+	}()
+}
+
+func (m *Monitor) probeAll() {
+	config := m.GetConfig()
+	type probeJob struct {
+		groupID string
+		target  Target
+	}
+
+	workerCount := countTargets(config)
+	if workerCount > maxProbeConcurrency {
+		workerCount = maxProbeConcurrency
+	}
+	jobs := make(chan probeJob, workerCount)
 	var wg sync.WaitGroup
-
-	for _, group := range m.config.Groups {
-		for _, target := range group.Targets {
-			wg.Add(1)
-			go func(g Group, t Target) {
-				defer wg.Done()
-
+	wg.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer wg.Done()
+			for job := range jobs {
 				time.Sleep(time.Duration(rand.Intn(2000)) * time.Millisecond)
-
-				result := m.Probe(t)
+				result := m.Probe(job.target)
 
 				m.mu.Lock()
-				if m.results[g.ID] == nil {
-					m.results[g.ID] = make(map[string]*Result)
+				if m.results[job.groupID] == nil {
+					m.results[job.groupID] = make(map[string]*Result)
 				}
-				m.results[g.ID][t.Name] = result
+				m.results[job.groupID][job.target.Name] = result
 				m.mu.Unlock()
-			}(group, target)
+			}
+		}()
+	}
+
+	for _, group := range config.Groups {
+		for _, target := range group.Targets {
+			jobs <- probeJob{groupID: group.ID, target: target}
 		}
 	}
+	close(jobs)
 
 	wg.Wait()
 
@@ -616,7 +754,8 @@ func (m *Monitor) Start(ctx context.Context) {
 	rand.Seed(time.Now().UnixNano())
 
 	for {
-		baseInterval := m.config.Server.RefreshInterval
+		config := m.GetConfig()
+		baseInterval := config.Server.RefreshInterval
 		if baseInterval <= 0 {
 			baseInterval = 120 * time.Second
 		}
@@ -672,6 +811,9 @@ func LoadConfig(path string) (*Config, error) {
 	var config Config
 	if err := yaml.Unmarshal(data, &config); err != nil {
 		return nil, fmt.Errorf("解析配置文件失败: %w", err)
+	}
+	if apiToken, ok := os.LookupEnv(apiTokenEnv); ok {
+		config.Server.APIToken = apiToken
 	}
 
 	if config.Server.Listen == "" {
@@ -2951,16 +3093,59 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
+func currentStatusUpdate(monitor *Monitor) *StatusUpdate {
+	return &StatusUpdate{
+		Groups:    monitor.GetGroupStatuses(),
+		CheckedAt: time.Now().Format("2006-01-02 15:04:05"),
+	}
+}
+
+func serveWebSocket(hub *Hub, monitor *Monitor, w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		logDebug("WebSocket升级失败: %v", err)
+		return
+	}
+
+	client := &websocketClient{
+		hub:  hub,
+		conn: conn,
+		send: make(chan *StatusUpdate, 256),
+	}
+	client.send <- currentStatusUpdate(monitor)
+	hub.register <- client
+
+	go client.writePump()
+	client.readPump()
+}
+
+func reloadRequestAuthorized(r *http.Request, configuredToken string) bool {
+	if configuredToken == "" {
+		return false
+	}
+	scheme, token, ok := strings.Cut(r.Header.Get("Authorization"), " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") || token == "" {
+		return false
+	}
+	providedHash := sha256.Sum256([]byte(token))
+	configuredHash := sha256.Sum256([]byte(configuredToken))
+	return subtle.ConstantTimeCompare(providedHash[:], configuredHash[:]) == 1
+}
+
+func resolveConfigPath(configPath, configShort string) string {
+	if configShort != "config.yaml" || configPath == "config.yaml" {
+		return configShort
+	}
+	return configPath
+}
+
 func main() {
 	configPath := flag.String("config", "config.yaml", "配置文件路径")
 	configShort := flag.String("c", "config.yaml", "配置文件路径")
 	flag.Parse()
 
 	// 使用 -c 参数优先，如果没有指定 -c 则使用 --config
-	actualConfigPath := *configPath
-	if *configShort != "config.yaml" || *configPath == "config.yaml" {
-		actualConfigPath = *configShort
-	}
+	actualConfigPath := resolveConfigPath(*configPath, *configShort)
 
 	// 检查是否有额外的命令行参数
 	args := flag.Args()
@@ -3066,28 +3251,11 @@ func main() {
 	hub := NewHub()
 	go hub.Run()
 
-	monitor := NewMonitor(config, *configPath, hub)
+	monitor := NewMonitor(config, actualConfigPath, hub)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go monitor.Start(ctx)
-
-	// WebSocket 心跳保活机制
-	// 每 30 秒发送一次空更新或特定心跳包，防止连接因闲置被断开
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				// 发送一个轻量级的心跳数据，或者复用状态数据
-				// 这里为了简单，直接触发一次当前状态的广播（开销很小）
-				monitor.broadcastStatus()
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
 
 	funcMap := template.FuncMap{
 		"tagClass":   makeTagClassFunc(config.Server.TagColors),
@@ -3155,52 +3323,7 @@ func main() {
 	})
 
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			logDebug("WebSocket升级失败: %v", err)
-			return
-		}
-
-		// 1. 设置读取限制 (防大包攻击)
-		conn.SetReadLimit(maxMessageSize)
-
-		// 2. 设置读取超时 (防僵尸连接)
-		conn.SetReadDeadline(time.Now().Add(pongWait))
-		conn.SetPongHandler(func(string) error {
-			conn.SetReadDeadline(time.Now().Add(pongWait))
-			return nil
-		})
-
-		hub.register <- conn
-
-		// 发送初始状态
-		groupStatuses := monitor.GetGroupStatuses()
-		update := &StatusUpdate{
-			Groups:    groupStatuses,
-			CheckedAt: time.Now().Format("2006-01-02 15:04:05"),
-		}
-
-		// 写入也要加超时
-		conn.SetWriteDeadline(time.Now().Add(writeWait))
-		if err := conn.WriteJSON(update); err != nil {
-			logDebug("WebSocket初始状态发送失败: %v", err)
-			conn.Close()
-			hub.unregister <- conn
-			return
-		}
-
-		// 循环读取 (处理 Close 消息和 Pong)
-		for {
-			_, _, err := conn.ReadMessage()
-			if err != nil {
-				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-					logDebug("WebSocket连接异常关闭: %v", err)
-				}
-				hub.unregister <- conn
-				conn.Close() // 确保关闭
-				break
-			}
-		}
+		serveWebSocket(hub, monitor, w, r)
 	})
 
 	// 安全的静态资源服务
@@ -3241,35 +3364,29 @@ func main() {
 	http.HandleFunc("/api/reload", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
-		// 验证API密钥
-		token := r.Header.Get("Authorization")
-		if token == "" {
-			// 也尝试从查询参数获取
-			token = r.URL.Query().Get("token")
-		}
-
-		if token != "" {
-			// 移除 "Bearer " 前缀（如果存在）
-			if strings.HasPrefix(token, "Bearer ") {
-				token = strings.TrimPrefix(token, "Bearer ")
-			}
-		}
-
-		// 如果配置了API密钥，必须匹配
-		if monitor.config.Server.APIToken != "" && token != monitor.config.Server.APIToken {
-			w.WriteHeader(http.StatusUnauthorized)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"error":   "未授权访问",
-			})
-			return
-		}
-
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": false,
 				"error":   "只支持 POST 请求",
+			})
+			return
+		}
+
+		currentConfig := monitor.GetConfig()
+		if currentConfig.Server.APIToken == "" {
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "配置热加载未启用",
+			})
+			return
+		}
+		if !reloadRequestAuthorized(r, currentConfig.Server.APIToken) {
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "未授权访问",
 			})
 			return
 		}
@@ -3285,7 +3402,7 @@ func main() {
 		}
 
 		// 立即执行一次探测
-		go monitor.ProbeAll()
+		monitor.QueueProbe()
 
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{
