@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"html/template"
@@ -469,10 +470,14 @@ func (m *Monitor) ReloadConfig() error {
 	// 检查代理配置是否改变
 	if m.config.Server.Proxy != newConfig.Server.Proxy {
 		oldProxy := m.config.Server.Proxy
+		oldTransport, _ := m.httpClient.Transport.(*http.Transport)
 		newTransport := createProxyTransport(newConfig.Server.Proxy)
 
 		// 安全地替换transport
 		m.httpClient.Transport = newTransport
+		if oldTransport != nil {
+			oldTransport.CloseIdleConnections()
+		}
 
 		// 记录变化
 		if newConfig.Server.Proxy == "" {
@@ -573,8 +578,14 @@ func (m *Monitor) Probe(target Target) *Result {
 	latency := time.Since(start)
 
 	if err != nil {
-		result.Status = "error"
-		result.LatencyMs = -1
+		var networkError net.Error
+		if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &networkError) && networkError.Timeout()) {
+			result.Status = "timeout"
+			result.LatencyMs = latency.Milliseconds()
+		} else {
+			result.Status = "error"
+			result.LatencyMs = -1
+		}
 		return result
 	}
 	defer resp.Body.Close()
@@ -718,16 +729,24 @@ func (m *Monitor) GetGroupStatuses() []GroupStatus {
 		healthyCount, slowCount, abnormalCount := 0, 0, 0
 
 		for _, target := range group.Targets {
-			if r, ok := m.results[group.ID][target.Name]; ok {
-				results = append(results, r)
-				switch r.Status {
-				case "healthy":
-					healthyCount++
-				case "slow":
-					slowCount++
-				default: // timeout, error
-					abnormalCount++
+			r, ok := m.results[group.ID][target.Name]
+			if !ok {
+				r = &Result{
+					Name:      target.Name,
+					URL:       strings.TrimSuffix(target.URL, "/v2/"),
+					Status:    "pending",
+					LatencyMs: -1,
+					Tags:      target.Tags,
 				}
+			}
+			results = append(results, r)
+			switch r.Status {
+			case "healthy":
+				healthyCount++
+			case "slow":
+				slowCount++
+			case "timeout", "error":
+				abnormalCount++
 			}
 		}
 
@@ -737,7 +756,7 @@ func (m *Monitor) GetGroupStatuses() []GroupStatus {
 			Description: group.Description,
 			OfficialURL: group.OfficialURL,
 			Results:     results,
-			Total:       len(results),
+			Total:       len(group.Targets),
 			Healthy:     healthyCount,
 			Slow:        slowCount,
 			Abnormal:    abnormalCount,
@@ -863,6 +882,17 @@ func ValidateConfig(config *Config) error {
 	if config.Server.SlowThreshold < 0 {
 		return fmt.Errorf("slow_threshold 不能为负数")
 	}
+	if config.Server.Proxy != "" {
+		proxyURL, err := url.Parse(config.Server.Proxy)
+		if err != nil || proxyURL.Host == "" {
+			return fmt.Errorf("proxy 格式无效")
+		}
+		switch proxyURL.Scheme {
+		case "http", "https", "socks5", "socks5h":
+		default:
+			return fmt.Errorf("proxy 协议不受支持: %s", proxyURL.Scheme)
+		}
+	}
 
 	// 校验分组配置
 	if len(config.Groups) == 0 {
@@ -904,9 +934,16 @@ func ValidateConfig(config *Config) error {
 				return fmt.Errorf("分组 '%s' 目标 '%s': url 不能为空", group.ID, target.Name)
 			}
 
-			// 校验URL格式
-			if _, err := url.Parse(target.URL); err != nil {
+			// 探测器仅支持带主机名的 HTTP(S) 目标。
+			targetURL, err := url.Parse(target.URL)
+			if err != nil || targetURL.Host == "" {
 				return fmt.Errorf("分组 '%s' 目标 '%s': url 格式无效: %v", group.ID, target.Name, err)
+			}
+			if targetURL.Scheme != "http" && targetURL.Scheme != "https" {
+				return fmt.Errorf("分组 '%s' 目标 '%s': url 仅支持 http 或 https", group.ID, target.Name)
+			}
+			if targetURL.User != nil {
+				return fmt.Errorf("分组 '%s' 目标 '%s': url 不允许包含凭据", group.ID, target.Name)
 			}
 
 			if target.Timeout < 0 {
@@ -3028,6 +3065,9 @@ const (
 )
 
 func formatTime(t time.Time) string {
+	if t.IsZero() {
+		return "--"
+	}
 	return t.Format("2006-01-02 15:04:05")
 }
 
