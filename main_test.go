@@ -237,6 +237,7 @@ func TestValidateConfigRejectsUnsupportedTargetURLs(t *testing.T) {
 		"registry.example/v2/",
 		"ftp://registry.example/v2/",
 		"https:///v2/",
+		"https://user:password@registry.example/v2/",
 	} {
 		t.Run(targetURL, func(t *testing.T) {
 			config := validTestConfig(targetURL)
