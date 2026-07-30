@@ -3,7 +3,7 @@ server:
   debug: false              # 调试模式：false=只显示错误/启动信息，true=显示所有连接日志
   refresh_interval: 1800s    # 全局刷新间隔，<= 300s，系统将自动启用 WebSocket，> 300s，系统将自动启用 HTTP 定时拉取
   slow_threshold: 3000     # 响应时间超过3000ms视为缓慢
-  api_token: "test-token-for-api-auth"  # API访问令牌
+  api_token: ""              # 热加载令牌；建议通过 DMM_API_TOKEN 环境变量设置
   
   # 站点配置
   site:

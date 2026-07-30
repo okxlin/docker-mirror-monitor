@@ -60,11 +60,13 @@
 docker pull moelin/docker-mirror-monitor:latest
 
 # 运行（使用默认配置）
-docker run -d -p 9080:9080 docker-mirror-monitor:latest
+docker run -d -p 9080:9080 moelin/docker-mirror-monitor:latest
 
 # 运行（使用自定义配置）
+export DMM_API_TOKEN='replace-with-a-long-random-token'
 docker run -d \
   -p 9080:9080 \
+  -e DMM_API_TOKEN \
   -v $(pwd)/config.yaml:/app/data/config.yaml \
   -v $(pwd)/data:/app/data \
   moelin/docker-mirror-monitor:latest
@@ -77,6 +79,8 @@ services:
     image: moelin/docker-mirror-monitor:latest
     ports:
       - "9080:9080"
+    environment:
+      - DMM_API_TOKEN
     volumes:
       # 挂载配置文件
       - ./config.yaml:/app/data/config.yaml
@@ -483,7 +487,7 @@ groups:
 
 ### 环境要求
 
-- Go 1.22+
+- Go 1.26.5+
 - Docker 20.10+
 - Docker Buildx（多架构编译）
 
@@ -503,11 +507,11 @@ docker images | grep docker-mirror-monitor
 **Dockerfile 说明：**
 
 ```dockerfile
-# 构建阶段 - 使用 golang:1.24.12-alpine 作为编译环境
-FROM --platform=$BUILDPLATFORM golang:1.24.12-alpine AS builder
+# 构建阶段 - 固定 Go 1.26.5 / Alpine 3.24 多架构镜像
+FROM --platform=$BUILDPLATFORM golang:1.26.5-alpine3.24@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS builder
 
-# 运行阶段 - 使用精简的 alpine 镜像
-FROM alpine:3.18
+# 运行阶段 - 固定 Alpine 3.24 多架构镜像
+FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 # 安装 ca-certificates（HTTPS支持）和 tzdata（时区支持）
 # 默认时区设置为 Asia/Shanghai
 ```
@@ -879,14 +883,13 @@ server {
 
 ## 配置热加载
 
-修改 `config.yaml` 后，无需重启服务，调用 API 即可热加载：
+修改 `config.yaml` 后，可调用 API 热加载。默认令牌为空，此时接口禁用；建议通过 `DMM_API_TOKEN` 环境变量设置令牌，避免把凭据提交到配置文件。
 
 ```bash
-# 热加载配置 (需要携带配置文件中定义的 api_token)
-curl -X POST "http://localhost:9080/api/reload?token=test-token-for-api-auth"
-
-# 或者使用 Header 方式：
-# curl -H "Authorization: test-token-for-api-auth" -X POST http://localhost:9080/api/reload
+# 仅接受 Bearer Header，不接受 URL 查询参数中的令牌
+curl -X POST \
+  -H "Authorization: Bearer ${DMM_API_TOKEN}" \
+  http://localhost:9080/api/reload
 
 # 成功响应
 {"success":true,"message":"配置重载成功，正在重新探测"}
