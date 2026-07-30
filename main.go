@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/json"
@@ -350,14 +351,17 @@ func (c *websocketClient) readPump() {
 
 // Monitor 监控器
 type Monitor struct {
-	config     *Config
-	configPath string
-	results    map[string]map[string]*Result // groupID -> targetName -> Result
-	mu         sync.RWMutex
-	reloadMu   sync.Mutex
-	probeMu    sync.Mutex
-	hub        *Hub
-	httpClient *http.Client
+	config            *Config
+	configPath        string
+	results           map[string]map[string]*Result // groupID -> targetName -> Result
+	mu                sync.RWMutex
+	reloadMu          sync.Mutex
+	probeMu           sync.Mutex
+	probeQueueMu      sync.Mutex
+	probeQueueRunning bool
+	probeQueued       bool
+	hub               *Hub
+	httpClient        *http.Client
 }
 
 func NewMonitor(config *Config, configPath string, hub *Hub) *Monitor {
@@ -618,7 +622,39 @@ func (m *Monitor) ProbeAll() bool {
 		return false
 	}
 	defer m.probeMu.Unlock()
+	m.probeAll()
+	return true
+}
 
+func (m *Monitor) QueueProbe() {
+	m.probeQueueMu.Lock()
+	m.probeQueued = true
+	if m.probeQueueRunning {
+		m.probeQueueMu.Unlock()
+		return
+	}
+	m.probeQueueRunning = true
+	m.probeQueueMu.Unlock()
+
+	go func() {
+		for {
+			m.probeQueueMu.Lock()
+			if !m.probeQueued {
+				m.probeQueueRunning = false
+				m.probeQueueMu.Unlock()
+				return
+			}
+			m.probeQueued = false
+			m.probeQueueMu.Unlock()
+
+			m.probeMu.Lock()
+			m.probeAll()
+			m.probeMu.Unlock()
+		}
+	}()
+}
+
+func (m *Monitor) probeAll() {
 	config := m.GetConfig()
 	type probeJob struct {
 		groupID string
@@ -659,7 +695,6 @@ func (m *Monitor) ProbeAll() bool {
 	wg.Wait()
 
 	m.broadcastStatus()
-	return true
 }
 
 func (m *Monitor) broadcastStatus() {
@@ -3092,7 +3127,9 @@ func reloadRequestAuthorized(r *http.Request, configuredToken string) bool {
 	if !ok || !strings.EqualFold(scheme, "Bearer") || token == "" {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(token), []byte(configuredToken)) == 1
+	providedHash := sha256.Sum256([]byte(token))
+	configuredHash := sha256.Sum256([]byte(configuredToken))
+	return subtle.ConstantTimeCompare(providedHash[:], configuredHash[:]) == 1
 }
 
 func resolveConfigPath(configPath, configShort string) string {
@@ -3365,7 +3402,7 @@ func main() {
 		}
 
 		// 立即执行一次探测
-		go monitor.ProbeAll()
+		monitor.QueueProbe()
 
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]interface{}{

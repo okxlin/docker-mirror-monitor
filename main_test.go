@@ -203,6 +203,59 @@ func TestReloadConfigAndProbeAllAreRaceFree(t *testing.T) {
 	}
 }
 
+func TestQueueProbeRunsAfterActiveProbeForReloadedConfig(t *testing.T) {
+	oldRequestStarted := make(chan struct{})
+	releaseOldRequest := make(chan struct{})
+	oldTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(oldRequestStarted)
+		<-releaseOldRequest
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer oldTarget.Close()
+
+	newRequestStarted := make(chan struct{})
+	newTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(newRequestStarted)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer newTarget.Close()
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	writeMonitorConfig(t, configPath, oldTarget.URL, "test-token")
+	config, err := LoadAndValidateConfig(configPath)
+	if err != nil {
+		t.Fatalf("load initial config: %v", err)
+	}
+	monitor := NewMonitor(config, configPath, NewHub())
+
+	activeProbe := make(chan bool, 1)
+	go func() {
+		activeProbe <- monitor.ProbeAll()
+	}()
+
+	select {
+	case <-oldRequestStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("initial probe did not start")
+	}
+
+	writeMonitorConfig(t, configPath, newTarget.URL, "test-token")
+	if err := monitor.ReloadConfig(); err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	monitor.QueueProbe()
+	close(releaseOldRequest)
+
+	if !<-activeProbe {
+		t.Fatal("active probe should complete")
+	}
+	select {
+	case <-newRequestStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("queued probe did not use the reloaded config")
+	}
+}
+
 func TestProbeAllLimitsConcurrentRequests(t *testing.T) {
 	const concurrencyLimit = 16
 
