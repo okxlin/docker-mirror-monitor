@@ -215,6 +215,23 @@ func TestGroupStatusesIncludePendingTargets(t *testing.T) {
 	}
 }
 
+func TestStatusLabel(t *testing.T) {
+	tests := map[string]string{
+		"pending": "检测中",
+		"healthy": "在线",
+		"slow":    "响应缓慢",
+		"timeout": "请求超时",
+		"error":   "离线",
+		"custom":  "custom",
+	}
+
+	for status, want := range tests {
+		if got := statusLabel(status); got != want {
+			t.Errorf("statusLabel(%q) = %q, want %q", status, got, want)
+		}
+	}
+}
+
 func TestValidateConfigRejectsUnsupportedTargetURLs(t *testing.T) {
 	for _, targetURL := range []string{
 		"registry.example/v2/",
