@@ -161,6 +161,122 @@ func TestProbeAllCoalescesConcurrentRuns(t *testing.T) {
 	}
 }
 
+func TestProbeClassifiesDeadlineAsTimeout(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer target.Close()
+
+	monitor := NewMonitor(&Config{}, "", NewHub())
+	result := monitor.Probe(Target{
+		Name:    "slow target",
+		URL:     target.URL,
+		Method:  http.MethodGet,
+		Timeout: 20 * time.Millisecond,
+	})
+
+	if result.Status != "timeout" {
+		t.Fatalf("probe status = %q, want timeout", result.Status)
+	}
+	if result.LatencyMs < 0 {
+		t.Fatalf("timeout latency = %d, want a measured duration", result.LatencyMs)
+	}
+}
+
+func TestGroupStatusesIncludePendingTargets(t *testing.T) {
+	config := &Config{Groups: []Group{{
+		ID:   "registry",
+		Name: "Registry",
+		Targets: []Target{
+			{Name: "first", URL: "https://first.example/v2/", Tags: []string{"one"}},
+			{Name: "second", URL: "https://second.example/v2/", Tags: []string{"two"}},
+		},
+	}}}
+	monitor := NewMonitor(config, "", NewHub())
+
+	statuses := monitor.GetGroupStatuses()
+	if len(statuses) != 1 {
+		t.Fatalf("group count = %d, want 1", len(statuses))
+	}
+	status := statuses[0]
+	if status.Total != 2 || len(status.Results) != 2 {
+		t.Fatalf("group total/results = %d/%d, want 2/2", status.Total, len(status.Results))
+	}
+	for i, result := range status.Results {
+		if result.Status != "pending" {
+			t.Errorf("result %d status = %q, want pending", i, result.Status)
+		}
+		if result.LatencyMs != -1 {
+			t.Errorf("result %d latency = %d, want -1", i, result.LatencyMs)
+		}
+		if got := formatTime(result.CheckedAt); got != "--" {
+			t.Errorf("result %d formatted time = %q, want --", i, got)
+		}
+	}
+}
+
+func TestStatusLabel(t *testing.T) {
+	tests := map[string]string{
+		"pending": "检测中",
+		"healthy": "在线",
+		"slow":    "响应缓慢",
+		"timeout": "请求超时",
+		"error":   "离线",
+		"custom":  "custom",
+	}
+
+	for status, want := range tests {
+		if got := statusLabel(status); got != want {
+			t.Errorf("statusLabel(%q) = %q, want %q", status, got, want)
+		}
+	}
+}
+
+func TestValidateConfigRejectsUnsupportedTargetURLs(t *testing.T) {
+	for _, targetURL := range []string{
+		"registry.example/v2/",
+		"ftp://registry.example/v2/",
+		"https:///v2/",
+		"https://user:password@registry.example/v2/",
+	} {
+		t.Run(targetURL, func(t *testing.T) {
+			config := validTestConfig(targetURL)
+			if err := ValidateConfig(config); err == nil {
+				t.Fatalf("ValidateConfig() accepted unsupported target URL %q", targetURL)
+			}
+		})
+	}
+}
+
+func TestValidateConfigRejectsInvalidProxy(t *testing.T) {
+	for _, proxyURL := range []string{
+		"proxy.example:8080",
+		"ftp://proxy.example:21",
+		"http:///missing-host",
+	} {
+		t.Run(proxyURL, func(t *testing.T) {
+			config := validTestConfig("https://registry.example/v2/")
+			config.Server.Proxy = proxyURL
+			if err := ValidateConfig(config); err == nil {
+				t.Fatalf("ValidateConfig() accepted invalid proxy URL %q", proxyURL)
+			}
+		})
+	}
+}
+
+func validTestConfig(targetURL string) *Config {
+	config := &Config{Groups: []Group{{
+		ID:   "registry",
+		Name: "Registry",
+		Targets: []Target{{
+			Name: "target",
+			URL:  targetURL,
+		}},
+	}}}
+	config.Server.RefreshInterval = time.Second
+	return config
+}
+
 func TestReloadConfigAndProbeAllAreRaceFree(t *testing.T) {
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"html/template"
@@ -469,10 +470,14 @@ func (m *Monitor) ReloadConfig() error {
 	// 检查代理配置是否改变
 	if m.config.Server.Proxy != newConfig.Server.Proxy {
 		oldProxy := m.config.Server.Proxy
+		oldTransport, _ := m.httpClient.Transport.(*http.Transport)
 		newTransport := createProxyTransport(newConfig.Server.Proxy)
 
 		// 安全地替换transport
 		m.httpClient.Transport = newTransport
+		if oldTransport != nil {
+			oldTransport.CloseIdleConnections()
+		}
 
 		// 记录变化
 		if newConfig.Server.Proxy == "" {
@@ -573,8 +578,14 @@ func (m *Monitor) Probe(target Target) *Result {
 	latency := time.Since(start)
 
 	if err != nil {
-		result.Status = "error"
-		result.LatencyMs = -1
+		var networkError net.Error
+		if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &networkError) && networkError.Timeout()) {
+			result.Status = "timeout"
+			result.LatencyMs = latency.Milliseconds()
+		} else {
+			result.Status = "error"
+			result.LatencyMs = -1
+		}
 		return result
 	}
 	defer resp.Body.Close()
@@ -718,16 +729,24 @@ func (m *Monitor) GetGroupStatuses() []GroupStatus {
 		healthyCount, slowCount, abnormalCount := 0, 0, 0
 
 		for _, target := range group.Targets {
-			if r, ok := m.results[group.ID][target.Name]; ok {
-				results = append(results, r)
-				switch r.Status {
-				case "healthy":
-					healthyCount++
-				case "slow":
-					slowCount++
-				default: // timeout, error
-					abnormalCount++
+			r, ok := m.results[group.ID][target.Name]
+			if !ok {
+				r = &Result{
+					Name:      target.Name,
+					URL:       strings.TrimSuffix(target.URL, "/v2/"),
+					Status:    "pending",
+					LatencyMs: -1,
+					Tags:      target.Tags,
 				}
+			}
+			results = append(results, r)
+			switch r.Status {
+			case "healthy":
+				healthyCount++
+			case "slow":
+				slowCount++
+			case "timeout", "error":
+				abnormalCount++
 			}
 		}
 
@@ -737,7 +756,7 @@ func (m *Monitor) GetGroupStatuses() []GroupStatus {
 			Description: group.Description,
 			OfficialURL: group.OfficialURL,
 			Results:     results,
-			Total:       len(results),
+			Total:       len(group.Targets),
 			Healthy:     healthyCount,
 			Slow:        slowCount,
 			Abnormal:    abnormalCount,
@@ -863,6 +882,17 @@ func ValidateConfig(config *Config) error {
 	if config.Server.SlowThreshold < 0 {
 		return fmt.Errorf("slow_threshold 不能为负数")
 	}
+	if config.Server.Proxy != "" {
+		proxyURL, err := url.Parse(config.Server.Proxy)
+		if err != nil || proxyURL.Host == "" {
+			return fmt.Errorf("proxy 格式无效")
+		}
+		switch proxyURL.Scheme {
+		case "http", "https", "socks5", "socks5h":
+		default:
+			return fmt.Errorf("proxy 协议不受支持: %s", proxyURL.Scheme)
+		}
+	}
 
 	// 校验分组配置
 	if len(config.Groups) == 0 {
@@ -904,9 +934,16 @@ func ValidateConfig(config *Config) error {
 				return fmt.Errorf("分组 '%s' 目标 '%s': url 不能为空", group.ID, target.Name)
 			}
 
-			// 校验URL格式
-			if _, err := url.Parse(target.URL); err != nil {
+			// 探测器仅支持带主机名的 HTTP(S) 目标。
+			targetURL, err := url.Parse(target.URL)
+			if err != nil || targetURL.Host == "" {
 				return fmt.Errorf("分组 '%s' 目标 '%s': url 格式无效: %v", group.ID, target.Name, err)
+			}
+			if targetURL.Scheme != "http" && targetURL.Scheme != "https" {
+				return fmt.Errorf("分组 '%s' 目标 '%s': url 仅支持 http 或 https", group.ID, target.Name)
+			}
+			if targetURL.User != nil {
+				return fmt.Errorf("分组 '%s' 目标 '%s': url 不允许包含凭据", group.ID, target.Name)
 			}
 
 			if target.Timeout < 0 {
@@ -1129,14 +1166,29 @@ const htmlTemplate = `<!DOCTYPE html>
             --card-shadow-hover: 0 8px 30px rgba(0,0,0,0.45);
         }
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
+		body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Inter', sans-serif;
             background: var(--bg-primary);
             color: var(--text-primary);
             min-height: 100vh;
             transition: background-color 0.3s, color 0.3s;
-        }
-        .container { max-width: 1200px; margin: 0 auto; padding: 0 20px; }
+		}
+		.container { max-width: 1200px; margin: 0 auto; padding: 0 20px; }
+		:focus-visible {
+			outline: 3px solid var(--primary);
+			outline-offset: 3px;
+		}
+		.visually-hidden {
+			position: absolute;
+			width: 1px;
+			height: 1px;
+			padding: 0;
+			margin: -1px;
+			overflow: hidden;
+			clip: rect(0, 0, 0, 0);
+			white-space: nowrap;
+			border: 0;
+		}
         
         header {
             background: var(--bg-secondary);
@@ -1284,12 +1336,17 @@ const htmlTemplate = `<!DOCTYPE html>
             overflow: hidden;
         }
         .theme-dropdown.show { display: block; }
-        .theme-option {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            padding: 12px 16px;
-            cursor: pointer;
+		.theme-option {
+			display: flex;
+			align-items: center;
+			gap: 10px;
+			width: 100%;
+			padding: 12px 16px;
+			border: 0;
+			background: transparent;
+			font: inherit;
+			text-align: left;
+			cursor: pointer;
             transition: all 0.2s;
             font-size: 0.85rem;
             color: var(--text-primary);
@@ -1727,10 +1784,11 @@ const htmlTemplate = `<!DOCTYPE html>
             flex-shrink: 0;
             transition: background-color 0.3s;
         }
-        .mirror-status.healthy { background: var(--success); }
-        .mirror-status.slow { background: var(--warning); }
-        .mirror-status.timeout { background: #ff9800; }
-        .mirror-status.error { background: var(--danger); }
+		.mirror-status.healthy { background: var(--success); }
+		.mirror-status.slow { background: var(--warning); }
+		.mirror-status.timeout { background: #ff9800; }
+		.mirror-status.error { background: var(--danger); }
+		.mirror-status.pending { background: var(--text-tertiary); }
         .mirror-name { font-size: 0.875rem; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .mirror-url { font-size: 0.75rem; color: var(--text-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .mirror-hint { font-size: 0.75rem; color: var(--text-tertiary); margin-top: 8px; }
@@ -1798,27 +1856,28 @@ const htmlTemplate = `<!DOCTYPE html>
             display: inline-block;
             transition: all 0.3s;
         }
-        .status-dot.healthy { background: var(--success); box-shadow: 0 0 8px var(--success); animation: pulse-success 2s infinite; }
-        .status-dot.slow { background: var(--warning); box-shadow: 0 0 8px var(--warning); animation: pulse-warning 2s infinite; }
-        .status-dot.timeout { background: #ff9800; box-shadow: 0 0 8px #ff9800; animation: pulse-warning 2s infinite; }
-        .status-dot.error { background: var(--danger); box-shadow: 0 0 8px var(--danger); animation: pulse-danger 2s infinite; }
+		.status-dot.healthy { background: var(--success); box-shadow: 0 0 8px var(--success); animation: pulse-success 2s infinite; }
+		.status-dot.slow { background: var(--warning); box-shadow: 0 0 8px var(--warning); animation: pulse-warning 2s infinite; }
+		.status-dot.timeout { background: #ff9800; box-shadow: 0 0 8px #ff9800; animation: pulse-warning 2s infinite; }
+		.status-dot.error { background: var(--danger); box-shadow: 0 0 8px var(--danger); animation: pulse-danger 2s infinite; }
+		.status-dot.pending { background: var(--text-tertiary); }
         @keyframes pulse-success { 0%, 100% { box-shadow: 0 0 0 0 rgba(0,180,42,0.4); } 50% { box-shadow: 0 0 8px 4px rgba(0,180,42,0.2); } }
         @keyframes pulse-warning { 0%, 100% { box-shadow: 0 0 0 0 rgba(255,125,0,0.4); } 50% { box-shadow: 0 0 8px 4px rgba(255,125,0,0.2); } }
         @keyframes pulse-danger { 0%, 100% { box-shadow: 0 0 0 0 rgba(245,63,63,0.4); } 50% { box-shadow: 0 0 8px 4px rgba(245,63,63,0.2); } }
         
         .site-name { font-weight: 600; }
-        .site-url {
+		.site-url {
             display: inline-block;
             background: linear-gradient(135deg, rgba(90,123,255,0.08) 0%, rgba(139,92,246,0.08) 100%);
             padding: 6px 12px;
             border-radius: 8px;
             font-family: monospace;
-            font-size: 0.8rem;
-            color: var(--text-secondary);
-            cursor: pointer;
-            transition: all 0.2s;
-            border: 1px solid transparent;
-        }
+			font-size: 0.8rem;
+			color: var(--text-secondary);
+			cursor: pointer;
+			transition: all 0.2s;
+			border: 1px solid transparent;
+		}
         .site-url:hover { 
             border-color: var(--primary);
             background: linear-gradient(135deg, rgba(90,123,255,0.15) 0%, rgba(139,92,246,0.15) 100%);
@@ -1846,8 +1905,9 @@ const htmlTemplate = `<!DOCTYPE html>
         
         .check-time { font-size: 0.875rem; }
         
-        .legend {
-            display: flex;
+		.legend {
+			display: flex;
+			flex-wrap: wrap;
             gap: 24px;
             margin-top: 16px;
             font-size: 0.75rem;
@@ -2130,11 +2190,25 @@ const htmlTemplate = `<!DOCTYPE html>
             color: var(--primary);
             border: 1px solid rgba(139,92,246,0.2);
         }
-        .ai-generated-badge i { font-size: 1rem; }
-    </style>
+		.ai-generated-badge i { font-size: 1rem; }
+		@media (max-width: 360px) {
+			.container { padding-left: 14px; padding-right: 14px; }
+			#current-theme-name { display: none; }
+			.theme-selector-btn { padding: 8px 10px; }
+			.stat-card { padding: 20px; }
+		}
+		@media (prefers-reduced-motion: reduce) {
+			*, *::before, *::after {
+				animation-duration: 0.01ms !important;
+				animation-iteration-count: 1 !important;
+				transition-duration: 0.01ms !important;
+				scroll-behavior: auto !important;
+			}
+		}
+	</style>
 </head>
 <body>
-    <div class="toast-container" id="toastContainer"></div>
+	<div class="toast-container" id="toastContainer" role="status" aria-live="polite" aria-atomic="true"></div>
     <header>
         <div class="container">
             <div class="header-content">
@@ -2152,28 +2226,28 @@ const htmlTemplate = `<!DOCTYPE html>
                 </a>
                 {{end}}
                 <div class="header-actions">
-                    <div class="ws-status">
+					<div class="ws-status" role="status" aria-live="polite">
                         <span class="ws-dot" id="ws-dot"></span>
                         <span id="ws-text">连接中...</span>
                     </div>
                     <div class="theme-selector">
-                        <button class="theme-selector-btn" id="theme-selector-btn" title="选择主题">
+						<button type="button" class="theme-selector-btn" id="theme-selector-btn" title="选择主题" aria-expanded="false" aria-controls="theme-dropdown">
                             <i class="fa fa-paint-brush"></i>
                             <span id="current-theme-name">紫蓝渐变</span>
                             <i class="fa fa-angle-down"></i>
                         </button>
                         <div class="theme-dropdown" id="theme-dropdown">
-                            <div class="theme-option active" data-theme="default">
-                                <span class="theme-preview preview-default"></span>
-                                <span>紫蓝渐变</span>
-                            </div>
-                            <div class="theme-option" data-theme="fresh-blue">
-                                <span class="theme-preview preview-fresh-blue"></span>
-                                <span>清新蓝</span>
-                            </div>
-                        </div>
-                    </div>
-                    <button id="theme-toggle" title="切换深色/浅色模式">
+							<button type="button" class="theme-option active" data-theme="default" aria-pressed="true">
+								<span class="theme-preview preview-default"></span>
+								<span>紫蓝渐变</span>
+							</button>
+							<button type="button" class="theme-option" data-theme="fresh-blue" aria-pressed="false">
+								<span class="theme-preview preview-fresh-blue"></span>
+								<span>清新蓝</span>
+							</button>
+						</div>
+					</div>
+					<button type="button" id="theme-toggle" title="切换深色/浅色模式" aria-label="切换深色或浅色模式">
                         <i class="fa fa-moon"></i>
                     </button>
                 </div>
@@ -2188,10 +2262,10 @@ const htmlTemplate = `<!DOCTYPE html>
         <!-- Tab导航 -->
         <nav class="tab-nav">
             {{range $index, $group := .Groups}}
-            <button class="tab-btn{{if eq $index 0}} active{{end}}" data-group="{{$group.ID}}">{{$group.Name}}</button>
+			<button type="button" class="tab-btn{{if eq $index 0}} active{{end}}" data-group="{{$group.ID}}">{{$group.Name}}</button>
             {{end}}
             {{if .About.Enabled}}
-            <button class="tab-btn" data-group="about"><i class="fa fa-info-circle"></i> {{if .About.Title}}{{.About.Title}}{{else}}关于{{end}}</button>
+			<button type="button" class="tab-btn" data-group="about"><i class="fa fa-info-circle"></i> {{if .About.Title}}{{.About.Title}}{{else}}关于{{end}}</button>
             {{end}}
         </nav>
 
@@ -2255,31 +2329,32 @@ const htmlTemplate = `<!DOCTYPE html>
                 <div class="mirror-selection-header">
                     <h4 class="mirror-selection-title">选择在线镜像源</h4>
                     <div class="mirror-selection-actions">
-                        <button class="btn-sm btn-success use-recommended"><i class="fa fa-star"></i> 使用推荐配置</button>
-                        <button class="btn-sm btn-primary select-all-online">全选在线</button>
-                        <button class="btn-sm btn-secondary clear-selection">清空选择</button>
+						<button type="button" class="btn-sm btn-success use-recommended"><i class="fa fa-star"></i> 使用推荐配置</button>
+						<button type="button" class="btn-sm btn-primary select-all-online">全选在线</button>
+						<button type="button" class="btn-sm btn-secondary clear-selection">清空选择</button>
                     </div>
                 </div>
 
                 <div class="mirror-grid">
                     {{range $idx, $res := $group.Results}}
-                    <div class="mirror-option" id="mirror-{{$group.ID}}-{{$idx}}" data-name="{{$res.Name}}" data-url="{{$res.URL}}" data-status="{{$res.Status}}">
-                        <input type="checkbox" class="mirror-checkbox">
-                        <div class="mirror-info">
-                            <div class="mirror-name-row">
-                                <span class="mirror-status {{$res.Status}}"></span>
+					<label class="mirror-option" id="mirror-{{$group.ID}}-{{$idx}}" data-name="{{$res.Name}}" data-url="{{$res.URL}}" data-status="{{$res.Status}}">
+						<input type="checkbox" class="mirror-checkbox">
+                        <span class="mirror-info">
+                            <span class="mirror-name-row">
+                                <span class="mirror-status {{$res.Status}}" aria-hidden="true"></span>
+                                <span class="visually-hidden mirror-status-label">{{statusLabel $res.Status}}</span>
                                 <span class="mirror-name">{{$res.Name}}</span>
-                            </div>
-                            <div class="mirror-url">{{$res.URL}}</div>
-                        </div>
-                    </div>
+                            </span>
+                            <span class="mirror-url">{{$res.URL}}</span>
+                        </span>
+					</label>
                     {{end}}
                 </div>
                 <p class="mirror-hint"><i class="fa fa-info-circle"></i> 建议选择 3-5 个镜像源以保证稳定性</p>
 
                 <div class="config-output-header">
                     <h4 class="mirror-selection-title">生成的配置</h4>
-                    <button class="btn-sm btn-success copy-config"><i class="fa fa-copy"></i> 复制配置</button>
+					<button type="button" class="btn-sm btn-success copy-config"><i class="fa fa-copy"></i> 复制配置</button>
                 </div>
                 <div class="code-block">
                     <pre><code class="config-output"></code></pre>
@@ -2306,9 +2381,9 @@ const htmlTemplate = `<!DOCTYPE html>
                         <tbody class="status-tbody">
                             {{range $idx, $res := $group.Results}}
                             <tr id="row-{{$group.ID}}-{{$idx}}" data-name="{{$res.Name}}">
-                                <td><span class="status-dot {{$res.Status}}"></span></td>
-                                <td class="site-name">{{$res.Name}}</td>
-                                <td><span class="site-url" onclick="copyUrl('{{$res.URL}}')">{{$res.URL}}</span></td>
+							<td><span class="status-dot {{$res.Status}}" aria-hidden="true"></span><span class="visually-hidden status-label">{{statusLabel $res.Status}}</span></td>
+							<td class="site-name">{{$res.Name}}</td>
+							<td><button type="button" class="site-url" data-copy-url="{{$res.URL}}" aria-label="复制 URL {{$res.URL}}">{{$res.URL}}</button></td>
                                 <td class="latency">{{if eq $res.LatencyMs -1}}--{{else}}{{$res.LatencyMs}} ms{{end}}</td>
                                 <td>
                                     <div class="tags">
@@ -2323,10 +2398,12 @@ const htmlTemplate = `<!DOCTYPE html>
                         </tbody>
                     </table>
                 </div>
-                <div class="legend">
-                    <span class="legend-item"><span class="status-dot healthy" style="width:10px;height:10px;"></span> 在线</span>
-                    <span class="legend-item"><span class="status-dot slow" style="width:10px;height:10px;"></span> 响应缓慢</span>
-                    <span class="legend-item"><span class="status-dot error" style="width:10px;height:10px;"></span> 离线</span>
+				<div class="legend">
+					<span class="legend-item"><span class="status-dot pending" style="width:10px;height:10px;" aria-hidden="true"></span> 检测中</span>
+					<span class="legend-item"><span class="status-dot healthy" style="width:10px;height:10px;" aria-hidden="true"></span> 在线</span>
+					<span class="legend-item"><span class="status-dot slow" style="width:10px;height:10px;" aria-hidden="true"></span> 响应缓慢</span>
+					<span class="legend-item"><span class="status-dot timeout" style="width:10px;height:10px;" aria-hidden="true"></span> 请求超时</span>
+					<span class="legend-item"><span class="status-dot error" style="width:10px;height:10px;" aria-hidden="true"></span> 离线</span>
                 </div>
             </div>
         </div>
@@ -2456,12 +2533,16 @@ const htmlTemplate = `<!DOCTYPE html>
 
     <script>
         // Toast 提示函数
-        function showToast(message, type = 'success', duration = 2500) {
-            const container = document.getElementById('toastContainer');
-            const toast = document.createElement('div');
-            toast.className = 'toast ' + type;
-            toast.innerHTML = '<i class="fa ' + (type === 'success' ? 'fa-check-circle' : 'fa-times-circle') + '"></i><span>' + message + '</span>';
-            container.appendChild(toast);
+		function showToast(message, type = 'success', duration = 2500) {
+			const container = document.getElementById('toastContainer');
+			const toast = document.createElement('div');
+			toast.className = 'toast ' + type;
+			const icon = document.createElement('i');
+			icon.className = 'fa ' + (type === 'success' ? 'fa-check-circle' : 'fa-times-circle');
+			const text = document.createElement('span');
+			text.textContent = message;
+			toast.append(icon, text);
+			container.appendChild(toast);
             
             setTimeout(() => {
                 toast.classList.add('hiding');
@@ -2508,9 +2589,10 @@ const htmlTemplate = `<!DOCTYPE html>
             
             // Update UI
             currentThemeName.textContent = themeNames[theme] || themeNames['default'];
-            themeOptions.forEach(opt => {
-                opt.classList.toggle('active', opt.dataset.theme === theme);
-            });
+			themeOptions.forEach(opt => {
+				opt.classList.toggle('active', opt.dataset.theme === theme);
+				opt.setAttribute('aria-pressed', String(opt.dataset.theme === theme));
+			});
             
             localStorage.setItem('colorTheme', theme);
         }
@@ -2533,23 +2615,34 @@ const htmlTemplate = `<!DOCTYPE html>
         });
         
         // Theme selector dropdown toggle
-        themeSelectorBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            themeDropdown.classList.toggle('show');
-        });
+		themeSelectorBtn.addEventListener('click', (e) => {
+			e.stopPropagation();
+			const expanded = themeDropdown.classList.toggle('show');
+			themeSelectorBtn.setAttribute('aria-expanded', String(expanded));
+		});
         
         // Theme option click
         themeOptions.forEach(opt => {
-            opt.addEventListener('click', () => {
-                setColorTheme(opt.dataset.theme);
-                themeDropdown.classList.remove('show');
-            });
-        });
+			opt.addEventListener('click', () => {
+				setColorTheme(opt.dataset.theme);
+				themeDropdown.classList.remove('show');
+				themeSelectorBtn.setAttribute('aria-expanded', 'false');
+				themeSelectorBtn.focus();
+			});
+		});
         
         // Close dropdown when clicking outside
-        document.addEventListener('click', () => {
-            themeDropdown.classList.remove('show');
-        });
+		document.addEventListener('click', () => {
+			themeDropdown.classList.remove('show');
+			themeSelectorBtn.setAttribute('aria-expanded', 'false');
+		});
+		document.addEventListener('keydown', (event) => {
+			if (event.key === 'Escape' && themeDropdown.classList.contains('show')) {
+				themeDropdown.classList.remove('show');
+				themeSelectorBtn.setAttribute('aria-expanded', 'false');
+				themeSelectorBtn.focus();
+			}
+		});
 
         // Tab切换
         let currentGroupId = document.querySelector('.tab-btn.active')?.dataset.group || '';
@@ -2589,7 +2682,7 @@ const htmlTemplate = `<!DOCTYPE html>
         let reconnectTimer;
 
         // --- 模式 A: WebSocket (适用于短间隔) ---
-        function connectWebSocket() {
+		function connectWebSocket() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             ws = new WebSocket(protocol + '//' + window.location.host + '/ws');
             
@@ -2604,14 +2697,47 @@ const htmlTemplate = `<!DOCTYPE html>
                 reconnectTimer = setTimeout(connectWebSocket, 5000);
             };
             
-            ws.onmessage = (event) => {
-                updateUI(JSON.parse(event.data));
-            };
-        }
+			ws.onmessage = (event) => {
+				try {
+					updateUI(JSON.parse(event.data));
+				} catch (error) {
+					console.error('WebSocket payload error:', error);
+					wsText.textContent = '数据异常';
+				}
+			};
+		}
 
-        function updateUI(data) {
-            // 更新所有分组的数据
-            data.groups.forEach(group => {
+		const statusLabels = {
+			pending: '检测中',
+			healthy: '在线',
+			slow: '响应缓慢',
+			timeout: '请求超时',
+			error: '离线'
+		};
+
+		function pageStructureMatches(data) {
+			const renderedGroups = Array.from(document.querySelectorAll('.group-content[data-official-url]'));
+			if (renderedGroups.length !== data.groups.length) return false;
+
+			return data.groups.every((group, groupIndex) => {
+				const groupEl = renderedGroups[groupIndex];
+				if (groupEl.dataset.groupId !== group.id) return false;
+
+				const rows = Array.from(groupEl.querySelectorAll('.status-tbody tr'));
+				return rows.length === group.results.length && group.results.every((result, index) => {
+					return rows[index].dataset.name === result.name;
+				});
+			});
+		}
+
+		function updateUI(data) {
+			if (!pageStructureMatches(data)) {
+				window.location.reload();
+				return;
+			}
+
+			// 更新所有分组的数据
+			data.groups.forEach(group => {
                 const groupEl = document.getElementById('group-' + group.id);
                 if (!groupEl) return;
                 
@@ -2630,15 +2756,18 @@ const htmlTemplate = `<!DOCTYPE html>
                     
                     if (row) {
                         const statusDot = row.querySelector('.status-dot');
-                        const oldStatus = statusDot.className.split(' ').find(c => ['healthy', 'slow', 'timeout', 'error'].includes(c));
-                        if (oldStatus !== result.status) {
-                            statusDot.className = 'status-dot ' + result.status;
-                            row.classList.add('update-flash');
-                            setTimeout(() => row.classList.remove('update-flash'), 500);
-                        }
+						const oldStatus = statusDot.className.split(' ').find(c => ['pending', 'healthy', 'slow', 'timeout', 'error'].includes(c));
+						if (oldStatus !== result.status) {
+							statusDot.className = 'status-dot ' + result.status;
+							row.classList.add('update-flash');
+							setTimeout(() => row.classList.remove('update-flash'), 500);
+						}
+						row.querySelector('.status-label').textContent = statusLabels[result.status] || result.status;
                         
                         row.querySelector('.latency').textContent = result.latency_ms === -1 ? '--' : result.latency_ms + ' ms';
-                        row.querySelector('.check-time').textContent = result.checked_at.replace('T', ' ').substring(0, 19);
+						row.querySelector('.check-time').textContent = result.checked_at.startsWith('0001-')
+							? '--'
+							: result.checked_at.replace('T', ' ').substring(0, 19);
                     }
 
                     // 更新镜像选择状态
@@ -2648,6 +2777,7 @@ const htmlTemplate = `<!DOCTYPE html>
                         mirrorOpt.dataset.status = result.status;
                         const statusIndicator = mirrorOpt.querySelector('.mirror-status');
                         statusIndicator.className = 'mirror-status ' + result.status;
+						mirrorOpt.querySelector('.mirror-status-label').textContent = statusLabels[result.status] || result.status;
                     }
                 });
             });
@@ -2725,7 +2855,7 @@ const htmlTemplate = `<!DOCTYPE html>
         }
 
         // Config generator for specific group
-        function getSelectedMirrorsForGroup(groupId) {
+		function getSelectedMirrorsForGroup(groupId) {
             const groupEl = document.getElementById('group-' + groupId);
             if (!groupEl) return [];
             const selected = [];
@@ -2739,34 +2869,46 @@ const htmlTemplate = `<!DOCTYPE html>
                     }
                 }
             });
-            return selected;
-        }
+			return selected;
+		}
 
-        function generateConfigForGroup(groupId) {
+		function escapeHTML(value) {
+			return String(value).replace(/[&<>"']/g, character => ({
+				'&': '&amp;',
+				'<': '&lt;',
+				'>': '&gt;',
+				'"': '&quot;',
+				"'": '&#39;'
+			})[character]);
+		}
+
+		function generateConfigForGroup(groupId) {
             const groupEl = document.getElementById('group-' + groupId);
             if (!groupEl) return;
             
             const mirrors = getSelectedMirrorsForGroup(groupId);
-            const configType = groupEl.querySelector('.config-type');
-            const configOutput = groupEl.querySelector('.config-output');
-            const type = configType ? configType.value : 'docker';
-            const registry = getRegistryDomain(groupId);
-            let config = '';
+			const configType = groupEl.querySelector('.config-type');
+			const configOutput = groupEl.querySelector('.config-output');
+			if (!configOutput) return;
+			const type = configType ? configType.value : 'docker';
+			const registry = getRegistryDomain(groupId);
+			const safeRegistry = escapeHTML(registry);
+			let config = '';
 
-            if (mirrors.length === 0) {
-                configOutput.innerHTML = '<span class="comment">' + configTemplates.empty_hint + '</span>';
-                return;
-            }
+			if (mirrors.length === 0) {
+				configOutput.innerHTML = '<span class="comment">' + escapeHTML(configTemplates.empty_hint) + '</span>';
+				return;
+			}
 
             // 生成步骤注释的辅助函数
             function buildStepsComment(tpl, registry) {
                 let header = '<span class="comment">################################################################################</span>\n';
-                header += '<span class="comment"># ' + tpl.title + ' (' + registry + ')</span>\n';
+				header += '<span class="comment"># ' + escapeHTML(tpl.title) + ' (' + escapeHTML(registry) + ')</span>\n';
                 header += '<span class="comment">################################################################################</span>\n';
                 header += '<span class="comment">#</span>\n';
                 header += '<span class="comment"># 使用步骤:</span>\n';
                 tpl.steps.forEach((step, i) => {
-                    header += '<span class="comment">#   ' + (i + 1) + '. ' + step.replace('{registry}', registry) + '</span>\n';
+					header += '<span class="comment">#   ' + (i + 1) + '. ' + escapeHTML(step.replace('{registry}', registry)) + '</span>\n';
                 });
                 header += '<span class="comment">################################################################################</span>\n\n';
                 return header;
@@ -2776,38 +2918,38 @@ const htmlTemplate = `<!DOCTYPE html>
                 const tpl = configTemplates.docker;
                 config = buildStepsComment(tpl, registry);
                 config += '{\n';
-                config += '    <span class="key">"registry-mirrors"</span>: [\n';
-                mirrors.forEach((m, i) => {
-                    config += '        <span class="string">"' + m + '"</span>' + (i < mirrors.length - 1 ? ',' : '') + '\n';
-                });
+				config += '    <span class="key">"registry-mirrors"</span>: [\n';
+				mirrors.forEach((m, i) => {
+					config += '        <span class="string">"' + escapeHTML(m) + '"</span>' + (i < mirrors.length - 1 ? ',' : '') + '\n';
+				});
                 config += '    ]\n';
                 config += '}';
             } else if (type === 'podman') {
                 const tpl = configTemplates.podman;
                 config = buildStepsComment(tpl, registry);
-                config += '<span class="key">unqualified-search-registries</span> = [<span class="string">"' + registry + '"</span>]\n\n';
-                config += '[[<span class="key">registry</span>]]\n';
-                config += '<span class="key">prefix</span> = <span class="string">"' + registry + '"</span>\n';
-                config += '<span class="key">location</span> = <span class="string">"' + registry + '"</span>\n\n';
-                mirrors.forEach(m => {
-                    config += '[[<span class="key">registry.mirror</span>]]\n';
-                    config += '<span class="key">location</span> = <span class="string">"' + m.replace('https://', '') + '"</span>\n\n';
-                });
+				config += '<span class="key">unqualified-search-registries</span> = [<span class="string">"' + safeRegistry + '"</span>]\n\n';
+				config += '[[<span class="key">registry</span>]]\n';
+				config += '<span class="key">prefix</span> = <span class="string">"' + safeRegistry + '"</span>\n';
+				config += '<span class="key">location</span> = <span class="string">"' + safeRegistry + '"</span>\n\n';
+				mirrors.forEach(m => {
+					config += '[[<span class="key">registry.mirror</span>]]\n';
+					config += '<span class="key">location</span> = <span class="string">"' + escapeHTML(m.replace('https://', '')) + '"</span>\n\n';
+				});
             } else if (type === 'containerd') {
                 const tpl = configTemplates.containerd;
                 config = buildStepsComment(tpl, registry);
-                config += '[<span class="key">plugins."io.containerd.grpc.v1.cri".registry.mirrors."' + registry + '"</span>]\n';
-                config += '  <span class="key">endpoint</span> = [\n';
-                mirrors.forEach((m, i) => {
-                    config += '    <span class="string">"' + m + '"</span>' + (i < mirrors.length - 1 ? ',' : '') + '\n';
-                });
+				config += '[<span class="key">plugins."io.containerd.grpc.v1.cri".registry.mirrors."' + safeRegistry + '"</span>]\n';
+				config += '  <span class="key">endpoint</span> = [\n';
+				mirrors.forEach((m, i) => {
+					config += '    <span class="string">"' + escapeHTML(m) + '"</span>' + (i < mirrors.length - 1 ? ',' : '') + '\n';
+				});
                 config += '  ]';
             } else if (type === 'nerdctl') {
                 const tpl = configTemplates.nerdctl;
                 config = buildStepsComment(tpl, registry);
-                config += '<span class="key">server</span> = <span class="string">"https://' + registry + '"</span>\n\n';
-                mirrors.forEach(m => {
-                    config += '[<span class="key">host.<span class="string">"' + m + '"</span></span>]\n';
+				config += '<span class="key">server</span> = <span class="string">"https://' + safeRegistry + '"</span>\n\n';
+				mirrors.forEach(m => {
+					config += '[<span class="key">host.<span class="string">"' + escapeHTML(m) + '"</span></span>]\n';
                     config += '  <span class="key">capabilities</span> = [<span class="string">"pull"</span>, <span class="string">"resolve"</span>]\n\n';
                 });
             }
@@ -2819,17 +2961,14 @@ const htmlTemplate = `<!DOCTYPE html>
         document.querySelectorAll('.group-content').forEach(groupEl => {
             const groupId = groupEl.dataset.groupId;
             
-            // 镜像选择点击
-            groupEl.querySelectorAll('.mirror-option').forEach(opt => {
-                opt.addEventListener('click', (e) => {
-                    if (e.target.type !== 'checkbox') {
-                        const cb = opt.querySelector('.mirror-checkbox');
-                        cb.checked = !cb.checked;
-                    }
-                    opt.classList.toggle('selected', opt.querySelector('.mirror-checkbox').checked);
-                    generateConfigForGroup(groupId);
-                });
-            });
+			// 原生 label 负责点击和键盘切换，change 事件只同步视觉与配置。
+			groupEl.querySelectorAll('.mirror-checkbox').forEach(cb => {
+				cb.addEventListener('change', () => {
+					const opt = cb.closest('.mirror-option');
+					opt.classList.toggle('selected', cb.checked);
+					generateConfigForGroup(groupId);
+				});
+			});
 
             // 配置类型切换
             const configType = groupEl.querySelector('.config-type');
@@ -2891,33 +3030,39 @@ const htmlTemplate = `<!DOCTYPE html>
             });
 
             // 复制配置
-            groupEl.querySelector('.copy-config')?.addEventListener('click', () => {
-                const text = groupEl.querySelector('.config-output').innerText;
-                navigator.clipboard.writeText(text).then(() => {
-                    showToast('配置已复制到剪贴板');
-                });
-            });
+			groupEl.querySelector('.copy-config')?.addEventListener('click', () => {
+				const text = groupEl.querySelector('.config-output').innerText;
+				copyText(text, '配置已复制到剪贴板');
+			});
 
             // 初始化配置显示
-            generateConfigForGroup(groupId);
-        });
+			generateConfigForGroup(groupId);
+		});
 
-        function copyUrl(url) {
-            // 优先尝试现代 API
-            if (navigator.clipboard && navigator.clipboard.writeText) {
-                navigator.clipboard.writeText(url).then(() => {
-                    showToast('URL 已复制');
-                }).catch(err => {
-                    console.error('Clipboard API failed:', err);
-                    fallbackCopyTextToClipboard(url);
-                });
-            } else {
-                // 回退到旧版 API
-                fallbackCopyTextToClipboard(url);
-            }
-        }
+		document.querySelectorAll('.site-url').forEach(button => {
+			button.addEventListener('click', () => copyUrl(button.dataset.copyUrl));
+		});
 
-        function fallbackCopyTextToClipboard(text) {
+		function copyUrl(url) {
+			copyText(url, 'URL 已复制');
+		}
+
+		function copyText(text, successMessage) {
+			// 优先尝试现代 API
+			if (navigator.clipboard && navigator.clipboard.writeText) {
+				navigator.clipboard.writeText(text).then(() => {
+					showToast(successMessage);
+				}).catch(err => {
+					console.error('Clipboard API failed:', err);
+					fallbackCopyTextToClipboard(text, successMessage);
+				});
+			} else {
+				// 回退到旧版 API
+				fallbackCopyTextToClipboard(text, successMessage);
+			}
+		}
+
+		function fallbackCopyTextToClipboard(text, successMessage) {
             var textArea = document.createElement("textarea");
             textArea.value = text;
             
@@ -2930,10 +3075,10 @@ const htmlTemplate = `<!DOCTYPE html>
             textArea.focus();
             textArea.select();
 
-            try {
-                var successful = document.execCommand('copy');
-                if (successful) {
-                    showToast('URL 已复制');
+			try {
+				var successful = document.execCommand('copy');
+				if (successful) {
+					showToast(successMessage);
                 } else {
                     showToast('复制失败，请手动复制', 'error');
                 }
@@ -2986,6 +3131,23 @@ func tagClass(tag string) string {
 	}
 }
 
+func statusLabel(status string) string {
+	switch status {
+	case "pending":
+		return "检测中"
+	case "healthy":
+		return "在线"
+	case "slow":
+		return "响应缓慢"
+	case "timeout":
+		return "请求超时"
+	case "error":
+		return "离线"
+	default:
+		return status
+	}
+}
+
 func makeTagClassFunc(tagColors []TagColor) func(string) string {
 	return func(tag string) string {
 		tagLower := strings.ToLower(tag)
@@ -3028,6 +3190,9 @@ const (
 )
 
 func formatTime(t time.Time) string {
+	if t.IsZero() {
+		return "--"
+	}
 	return t.Format("2006-01-02 15:04:05")
 }
 
@@ -3258,9 +3423,10 @@ func main() {
 	go monitor.Start(ctx)
 
 	funcMap := template.FuncMap{
-		"tagClass":   makeTagClassFunc(config.Server.TagColors),
-		"formatTime": formatTime,
-		"isImage":    isImage, // <--- [新增] 注册 isImage 函数
+		"tagClass":    makeTagClassFunc(config.Server.TagColors),
+		"statusLabel": statusLabel,
+		"formatTime":  formatTime,
+		"isImage":     isImage, // <--- [新增] 注册 isImage 函数
 		"json": func(v interface{}) template.JS {
 			b, err := json.Marshal(v)
 			if err != nil {
