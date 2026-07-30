@@ -218,6 +218,8 @@ type StatusUpdate struct {
 	CheckedAt string        `json:"checked_at"`
 }
 
+const maxProbeConcurrency = 16
+
 type websocketClient struct {
 	hub  *Hub
 	conn *websocket.Conn
@@ -618,27 +620,41 @@ func (m *Monitor) ProbeAll() bool {
 	defer m.probeMu.Unlock()
 
 	config := m.GetConfig()
+	type probeJob struct {
+		groupID string
+		target  Target
+	}
+
+	workerCount := countTargets(config)
+	if workerCount > maxProbeConcurrency {
+		workerCount = maxProbeConcurrency
+	}
+	jobs := make(chan probeJob, workerCount)
 	var wg sync.WaitGroup
+	wg.Add(workerCount)
+	for range workerCount {
+		go func() {
+			defer wg.Done()
+			for job := range jobs {
+				time.Sleep(time.Duration(rand.Intn(2000)) * time.Millisecond)
+				result := m.Probe(job.target)
+
+				m.mu.Lock()
+				if m.results[job.groupID] == nil {
+					m.results[job.groupID] = make(map[string]*Result)
+				}
+				m.results[job.groupID][job.target.Name] = result
+				m.mu.Unlock()
+			}
+		}()
+	}
 
 	for _, group := range config.Groups {
 		for _, target := range group.Targets {
-			wg.Add(1)
-			go func(g Group, t Target) {
-				defer wg.Done()
-
-				time.Sleep(time.Duration(rand.Intn(2000)) * time.Millisecond)
-
-				result := m.Probe(t)
-
-				m.mu.Lock()
-				if m.results[g.ID] == nil {
-					m.results[g.ID] = make(map[string]*Result)
-				}
-				m.results[g.ID][t.Name] = result
-				m.mu.Unlock()
-			}(group, target)
+			jobs <- probeJob{groupID: group.ID, target: target}
 		}
 	}
+	close(jobs)
 
 	wg.Wait()
 

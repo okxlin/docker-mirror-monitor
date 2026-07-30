@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -199,6 +200,65 @@ func TestReloadConfigAndProbeAllAreRaceFree(t *testing.T) {
 	close(errors)
 	for err := range errors {
 		t.Errorf("reload config: %v", err)
+	}
+}
+
+func TestProbeAllLimitsConcurrentRequests(t *testing.T) {
+	const concurrencyLimit = 16
+
+	var current atomic.Int32
+	var maximum atomic.Int32
+	releaseRequests := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(releaseRequests)
+		}
+	}()
+
+	targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		active := current.Add(1)
+		defer current.Add(-1)
+		for {
+			observed := maximum.Load()
+			if active <= observed || maximum.CompareAndSwap(observed, active) {
+				break
+			}
+		}
+		<-releaseRequests
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer targetServer.Close()
+
+	targets := make([]Target, 64)
+	for i := range targets {
+		targets[i] = Target{
+			Name:    fmt.Sprintf("target-%d", i),
+			URL:     fmt.Sprintf("%s?id=%d", targetServer.URL, i),
+			Method:  http.MethodGet,
+			Timeout: 10 * time.Second,
+		}
+	}
+	config := &Config{Groups: []Group{{ID: "test", Name: "Test", Targets: targets}}}
+	monitor := NewMonitor(config, "", NewHub())
+
+	probeResult := make(chan bool, 1)
+	go func() {
+		probeResult <- monitor.ProbeAll()
+	}()
+
+	deadline := time.Now().Add(2500 * time.Millisecond)
+	for time.Now().Before(deadline) && maximum.Load() <= concurrencyLimit {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	close(releaseRequests)
+	released = true
+	if !<-probeResult {
+		t.Fatal("probe run should complete")
+	}
+	if got := maximum.Load(); got > concurrencyLimit {
+		t.Fatalf("maximum concurrent probes = %d, want <= %d", got, concurrencyLimit)
 	}
 }
 
