@@ -6,9 +6,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 func TestReloadRequestAuthorization(t *testing.T) {
@@ -196,5 +199,54 @@ func TestReloadConfigAndProbeAllAreRaceFree(t *testing.T) {
 	close(errors)
 	for err := range errors {
 		t.Errorf("reload config: %v", err)
+	}
+}
+
+func TestServeWebSocketSerializesInitialStateAndBroadcasts(t *testing.T) {
+	hub := NewHub()
+	go hub.Run()
+
+	monitor := NewMonitor(&Config{}, "", hub)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serveWebSocket(hub, monitor, w, r)
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + server.URL[len("http"):]
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer conn.Close()
+
+	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	var update StatusUpdate
+	if err := conn.ReadJSON(&update); err != nil {
+		t.Fatalf("read initial websocket update: %v", err)
+	}
+	if update.CheckedAt == "" {
+		t.Fatal("initial websocket update must include checked_at")
+	}
+
+	stopBroadcasts := make(chan struct{})
+	defer close(stopBroadcasts)
+	go func() {
+		for i := 0; ; i++ {
+			select {
+			case <-stopBroadcasts:
+				return
+			default:
+				hub.Broadcast(&StatusUpdate{CheckedAt: fmt.Sprintf("broadcast-%d", i)})
+			}
+		}
+	}()
+
+	if err := conn.ReadJSON(&update); err != nil {
+		t.Fatalf("read broadcast websocket update: %v", err)
+	}
+	if !strings.HasPrefix(update.CheckedAt, "broadcast-") {
+		t.Fatalf("broadcast checked_at = %q", update.CheckedAt)
 	}
 }

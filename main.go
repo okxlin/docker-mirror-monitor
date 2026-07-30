@@ -218,64 +218,69 @@ type StatusUpdate struct {
 	CheckedAt string        `json:"checked_at"`
 }
 
+type websocketClient struct {
+	hub  *Hub
+	conn *websocket.Conn
+	send chan *StatusUpdate
+}
+
 // Hub WebSocket连接管理
 type Hub struct {
-	clients    map[*websocket.Conn]bool
+	clients    map[*websocketClient]bool
 	broadcast  chan *StatusUpdate
-	register   chan *websocket.Conn
-	unregister chan *websocket.Conn
+	register   chan *websocketClient
+	unregister chan *websocketClient
 	mu         sync.RWMutex
 }
 
 func NewHub() *Hub {
 	return &Hub{
-		clients:    make(map[*websocket.Conn]bool),
+		clients:    make(map[*websocketClient]bool),
 		broadcast:  make(chan *StatusUpdate),
-		register:   make(chan *websocket.Conn),
-		unregister: make(chan *websocket.Conn),
+		register:   make(chan *websocketClient),
+		unregister: make(chan *websocketClient),
 	}
 }
 
 func (h *Hub) Run() {
 	for {
 		select {
-		case conn := <-h.register:
+		case client := <-h.register:
 			h.mu.Lock()
-			h.clients[conn] = true
+			h.clients[client] = true
 			clientCount := len(h.clients)
 			h.mu.Unlock()
 			logDebug("WebSocket客户端连接, 当前连接数: %d", clientCount)
 
-		case conn := <-h.unregister:
+		case client := <-h.unregister:
 			h.mu.Lock()
-			if _, ok := h.clients[conn]; ok {
-				delete(h.clients, conn)
-				conn.Close()
+			if _, ok := h.clients[client]; ok {
+				delete(h.clients, client)
+				close(client.send)
+				client.conn.Close()
 			}
 			clientCount := len(h.clients)
 			h.mu.Unlock()
 			logDebug("WebSocket客户端断开, 当前连接数: %d", clientCount)
 
 		case update := <-h.broadcast:
-			// 收集失败的连接，避免在遍历时修改map
-			var failedConns []*websocket.Conn
+			var slowClients []*websocketClient
 			h.mu.RLock()
-			for conn := range h.clients {
-				// 设置写入超时，防止慢客户端阻塞 Hub
-				conn.SetWriteDeadline(time.Now().Add(writeWait))
-				err := conn.WriteJSON(update)
-				if err != nil {
-					failedConns = append(failedConns, conn)
+			for client := range h.clients {
+				select {
+				case client.send <- update:
+				default:
+					slowClients = append(slowClients, client)
 				}
 			}
 			h.mu.RUnlock()
 
-			// 统一处理失败的连接
-			for _, conn := range failedConns {
+			for _, client := range slowClients {
 				h.mu.Lock()
-				if _, ok := h.clients[conn]; ok {
-					delete(h.clients, conn)
-					conn.Close()
+				if _, ok := h.clients[client]; ok {
+					delete(h.clients, client)
+					close(client.send)
+					client.conn.Close()
 				}
 				h.mu.Unlock()
 			}
@@ -287,6 +292,57 @@ func (h *Hub) Broadcast(update *StatusUpdate) {
 	select {
 	case h.broadcast <- update:
 	default:
+	}
+}
+
+func (c *websocketClient) writePump() {
+	ticker := time.NewTicker(pingPeriod)
+	defer func() {
+		ticker.Stop()
+		c.hub.unregister <- c
+		c.conn.Close()
+	}()
+
+	for {
+		select {
+		case update, ok := <-c.send:
+			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if !ok {
+				_ = c.conn.WriteMessage(websocket.CloseMessage, nil)
+				return
+			}
+			if err := c.conn.WriteJSON(update); err != nil {
+				return
+			}
+		case <-ticker.C:
+			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func (c *websocketClient) readPump() {
+	defer func() {
+		c.hub.unregister <- c
+		c.conn.Close()
+	}()
+
+	c.conn.SetReadLimit(maxMessageSize)
+	c.conn.SetReadDeadline(time.Now().Add(pongWait))
+	c.conn.SetPongHandler(func(string) error {
+		c.conn.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
+
+	for {
+		if _, _, err := c.conn.ReadMessage(); err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				logDebug("WebSocket连接异常关闭: %v", err)
+			}
+			return
+		}
 	}
 }
 
@@ -2986,6 +3042,32 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
+func currentStatusUpdate(monitor *Monitor) *StatusUpdate {
+	return &StatusUpdate{
+		Groups:    monitor.GetGroupStatuses(),
+		CheckedAt: time.Now().Format("2006-01-02 15:04:05"),
+	}
+}
+
+func serveWebSocket(hub *Hub, monitor *Monitor, w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		logDebug("WebSocket升级失败: %v", err)
+		return
+	}
+
+	client := &websocketClient{
+		hub:  hub,
+		conn: conn,
+		send: make(chan *StatusUpdate, 256),
+	}
+	client.send <- currentStatusUpdate(monitor)
+	hub.register <- client
+
+	go client.writePump()
+	client.readPump()
+}
+
 func reloadRequestAuthorized(r *http.Request, configuredToken string) bool {
 	if configuredToken == "" {
 		return false
@@ -3122,23 +3204,6 @@ func main() {
 	defer cancel()
 	go monitor.Start(ctx)
 
-	// WebSocket 心跳保活机制
-	// 每 30 秒发送一次空更新或特定心跳包，防止连接因闲置被断开
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				// 发送一个轻量级的心跳数据，或者复用状态数据
-				// 这里为了简单，直接触发一次当前状态的广播（开销很小）
-				monitor.broadcastStatus()
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-
 	funcMap := template.FuncMap{
 		"tagClass":   makeTagClassFunc(config.Server.TagColors),
 		"formatTime": formatTime,
@@ -3205,52 +3270,7 @@ func main() {
 	})
 
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			logDebug("WebSocket升级失败: %v", err)
-			return
-		}
-
-		// 1. 设置读取限制 (防大包攻击)
-		conn.SetReadLimit(maxMessageSize)
-
-		// 2. 设置读取超时 (防僵尸连接)
-		conn.SetReadDeadline(time.Now().Add(pongWait))
-		conn.SetPongHandler(func(string) error {
-			conn.SetReadDeadline(time.Now().Add(pongWait))
-			return nil
-		})
-
-		hub.register <- conn
-
-		// 发送初始状态
-		groupStatuses := monitor.GetGroupStatuses()
-		update := &StatusUpdate{
-			Groups:    groupStatuses,
-			CheckedAt: time.Now().Format("2006-01-02 15:04:05"),
-		}
-
-		// 写入也要加超时
-		conn.SetWriteDeadline(time.Now().Add(writeWait))
-		if err := conn.WriteJSON(update); err != nil {
-			logDebug("WebSocket初始状态发送失败: %v", err)
-			conn.Close()
-			hub.unregister <- conn
-			return
-		}
-
-		// 循环读取 (处理 Close 消息和 Pong)
-		for {
-			_, _, err := conn.ReadMessage()
-			if err != nil {
-				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-					logDebug("WebSocket连接异常关闭: %v", err)
-				}
-				hub.unregister <- conn
-				conn.Close() // 确保关闭
-				break
-			}
-		}
+		serveWebSocket(hub, monitor, w, r)
 	})
 
 	// 安全的静态资源服务
