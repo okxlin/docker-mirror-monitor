@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"crypto/tls"
 	"encoding/json"
 	"flag"
@@ -22,6 +23,8 @@ import (
 	"golang.org/x/net/proxy"
 	"gopkg.in/yaml.v3"
 )
+
+const apiTokenEnv = "DMM_API_TOKEN"
 
 // TagColor 标签颜色配置
 type TagColor struct {
@@ -334,7 +337,7 @@ func createProxyTransport(proxyAddr string) *http.Transport {
 
 	proxyURL, err := url.Parse(proxyAddr)
 	if err != nil {
-		log.Printf("代理地址无效: %v", err)
+		log.Printf("代理地址无效")
 		return transport
 	}
 
@@ -363,13 +366,29 @@ func createProxyTransport(proxyAddr string) *http.Transport {
 	case "http", "https":
 		// HTTP/HTTPS代理
 		transport.Proxy = http.ProxyURL(proxyURL)
-		log.Printf("使用HTTP代理: %s", proxyAddr)
+		log.Printf("使用HTTP代理: %s", redactProxyAddress(proxyAddr))
 
 	default:
 		log.Printf("不支持的代理协议: %s", proxyURL.Scheme)
 	}
 
 	return transport
+}
+
+func redactProxyAddress(proxyAddr string) string {
+	if proxyAddr == "" {
+		return ""
+	}
+	proxyURL, err := url.Parse(proxyAddr)
+	if err != nil || proxyURL.Scheme == "" || proxyURL.Host == "" {
+		return "<invalid>"
+	}
+	proxyURL.User = nil
+	proxyURL.Path = ""
+	proxyURL.RawPath = ""
+	proxyURL.RawQuery = ""
+	proxyURL.Fragment = ""
+	return proxyURL.String()
 }
 
 // ReloadConfig 热加载配置文件
@@ -395,9 +414,9 @@ func (m *Monitor) ReloadConfig() error {
 
 		// 记录变化
 		if newConfig.Server.Proxy == "" {
-			log.Printf("代理已禁用 (原代理: %s)", oldProxy)
+			log.Printf("代理已禁用 (原代理: %s)", redactProxyAddress(oldProxy))
 		} else {
-			log.Printf("代理已更新: %s (原代理: %s)", newConfig.Server.Proxy, oldProxy)
+			log.Printf("代理已更新: %s (原代理: %s)", redactProxyAddress(newConfig.Server.Proxy), redactProxyAddress(oldProxy))
 		}
 	}
 
@@ -685,6 +704,9 @@ func LoadConfig(path string) (*Config, error) {
 	var config Config
 	if err := yaml.Unmarshal(data, &config); err != nil {
 		return nil, fmt.Errorf("解析配置文件失败: %w", err)
+	}
+	if apiToken, ok := os.LookupEnv(apiTokenEnv); ok {
+		config.Server.APIToken = apiToken
 	}
 
 	if config.Server.Listen == "" {
@@ -2964,16 +2986,31 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
+func reloadRequestAuthorized(r *http.Request, configuredToken string) bool {
+	if configuredToken == "" {
+		return false
+	}
+	scheme, token, ok := strings.Cut(r.Header.Get("Authorization"), " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") || token == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(token), []byte(configuredToken)) == 1
+}
+
+func resolveConfigPath(configPath, configShort string) string {
+	if configShort != "config.yaml" || configPath == "config.yaml" {
+		return configShort
+	}
+	return configPath
+}
+
 func main() {
 	configPath := flag.String("config", "config.yaml", "配置文件路径")
 	configShort := flag.String("c", "config.yaml", "配置文件路径")
 	flag.Parse()
 
 	// 使用 -c 参数优先，如果没有指定 -c 则使用 --config
-	actualConfigPath := *configPath
-	if *configShort != "config.yaml" || *configPath == "config.yaml" {
-		actualConfigPath = *configShort
-	}
+	actualConfigPath := resolveConfigPath(*configPath, *configShort)
 
 	// 检查是否有额外的命令行参数
 	args := flag.Args()
@@ -3079,7 +3116,7 @@ func main() {
 	hub := NewHub()
 	go hub.Run()
 
-	monitor := NewMonitor(config, *configPath, hub)
+	monitor := NewMonitor(config, actualConfigPath, hub)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -3254,36 +3291,29 @@ func main() {
 	http.HandleFunc("/api/reload", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
-		// 验证API密钥
-		token := r.Header.Get("Authorization")
-		if token == "" {
-			// 也尝试从查询参数获取
-			token = r.URL.Query().Get("token")
-		}
-
-		if token != "" {
-			// 移除 "Bearer " 前缀（如果存在）
-			if strings.HasPrefix(token, "Bearer ") {
-				token = strings.TrimPrefix(token, "Bearer ")
-			}
-		}
-
-		// 如果配置了API密钥，必须匹配
-		currentConfig := monitor.GetConfig()
-		if currentConfig.Server.APIToken != "" && token != currentConfig.Server.APIToken {
-			w.WriteHeader(http.StatusUnauthorized)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": false,
-				"error":   "未授权访问",
-			})
-			return
-		}
-
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": false,
 				"error":   "只支持 POST 请求",
+			})
+			return
+		}
+
+		currentConfig := monitor.GetConfig()
+		if currentConfig.Server.APIToken == "" {
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "配置热加载未启用",
+			})
+			return
+		}
+		if !reloadRequestAuthorized(r, currentConfig.Server.APIToken) {
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"error":   "未授权访问",
 			})
 			return
 		}
