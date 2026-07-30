@@ -293,6 +293,8 @@ type Monitor struct {
 	configPath string
 	results    map[string]map[string]*Result // groupID -> targetName -> Result
 	mu         sync.RWMutex
+	reloadMu   sync.Mutex
+	probeMu    sync.Mutex
 	hub        *Hub
 	httpClient *http.Client
 }
@@ -372,6 +374,9 @@ func createProxyTransport(proxyAddr string) *http.Transport {
 
 // ReloadConfig 热加载配置文件
 func (m *Monitor) ReloadConfig() error {
+	m.reloadMu.Lock()
+	defer m.reloadMu.Unlock()
+
 	newConfig, err := LoadAndValidateConfig(m.configPath)
 	if err != nil {
 		return fmt.Errorf("配置加载失败: %w", err)
@@ -414,13 +419,13 @@ func (m *Monitor) ReloadConfig() error {
 	}
 	m.results = newResults
 
-	log.Printf("配置热加载成功: %d 个分组, 共 %d 个监控目标", len(newConfig.Groups), m.getTotalTargets())
+	log.Printf("配置热加载成功: %d 个分组, 共 %d 个监控目标", len(newConfig.Groups), countTargets(newConfig))
 	return nil
 }
 
-func (m *Monitor) getTotalTargets() int {
+func countTargets(config *Config) int {
 	total := 0
-	for _, group := range m.config.Groups {
+	for _, group := range config.Groups {
 		total += len(group.Targets)
 	}
 	return total
@@ -531,10 +536,16 @@ func (m *Monitor) Probe(target Target) *Result {
 	return result
 }
 
-func (m *Monitor) ProbeAll() {
+func (m *Monitor) ProbeAll() bool {
+	if !m.probeMu.TryLock() {
+		return false
+	}
+	defer m.probeMu.Unlock()
+
+	config := m.GetConfig()
 	var wg sync.WaitGroup
 
-	for _, group := range m.config.Groups {
+	for _, group := range config.Groups {
 		for _, target := range group.Targets {
 			wg.Add(1)
 			go func(g Group, t Target) {
@@ -557,6 +568,7 @@ func (m *Monitor) ProbeAll() {
 	wg.Wait()
 
 	m.broadcastStatus()
+	return true
 }
 
 func (m *Monitor) broadcastStatus() {
@@ -616,7 +628,8 @@ func (m *Monitor) Start(ctx context.Context) {
 	rand.Seed(time.Now().UnixNano())
 
 	for {
-		baseInterval := m.config.Server.RefreshInterval
+		config := m.GetConfig()
+		baseInterval := config.Server.RefreshInterval
 		if baseInterval <= 0 {
 			baseInterval = 120 * time.Second
 		}
@@ -3256,7 +3269,8 @@ func main() {
 		}
 
 		// 如果配置了API密钥，必须匹配
-		if monitor.config.Server.APIToken != "" && token != monitor.config.Server.APIToken {
+		currentConfig := monitor.GetConfig()
+		if currentConfig.Server.APIToken != "" && token != currentConfig.Server.APIToken {
 			w.WriteHeader(http.StatusUnauthorized)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": false,
