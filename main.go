@@ -2341,7 +2341,8 @@ const htmlTemplate = `<!DOCTYPE html>
 						<input type="checkbox" class="mirror-checkbox">
                         <span class="mirror-info">
                             <span class="mirror-name-row">
-                                <span class="mirror-status {{$res.Status}}"></span>
+                                <span class="mirror-status {{$res.Status}}" aria-hidden="true"></span>
+                                <span class="visually-hidden mirror-status-label">{{statusLabel $res.Status}}</span>
                                 <span class="mirror-name">{{$res.Name}}</span>
                             </span>
                             <span class="mirror-url">{{$res.URL}}</span>
@@ -2401,6 +2402,7 @@ const htmlTemplate = `<!DOCTYPE html>
 					<span class="legend-item"><span class="status-dot pending" style="width:10px;height:10px;" aria-hidden="true"></span> 检测中</span>
 					<span class="legend-item"><span class="status-dot healthy" style="width:10px;height:10px;" aria-hidden="true"></span> 在线</span>
 					<span class="legend-item"><span class="status-dot slow" style="width:10px;height:10px;" aria-hidden="true"></span> 响应缓慢</span>
+					<span class="legend-item"><span class="status-dot timeout" style="width:10px;height:10px;" aria-hidden="true"></span> 请求超时</span>
 					<span class="legend-item"><span class="status-dot error" style="width:10px;height:10px;" aria-hidden="true"></span> 离线</span>
                 </div>
             </div>
@@ -2775,6 +2777,7 @@ const htmlTemplate = `<!DOCTYPE html>
                         mirrorOpt.dataset.status = result.status;
                         const statusIndicator = mirrorOpt.querySelector('.mirror-status');
                         statusIndicator.className = 'mirror-status ' + result.status;
+						mirrorOpt.querySelector('.mirror-status-label').textContent = statusLabels[result.status] || result.status;
                     }
                 });
             });
