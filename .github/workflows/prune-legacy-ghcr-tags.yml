@@ -31,10 +31,12 @@ jobs:
           chmod 0700 "$regctl_path"
           "$regctl_path" version
 
-      - name: Prune legacy floating tags
+      - name: Isolate and prune legacy floating tags
         env:
+          GH_TOKEN: ${{ github.token }}
           GHCR_PASSWORD: ${{ secrets.GPR_TOKEN || github.token }}
           IMAGE: ghcr.io/${{ github.repository }}
+          PACKAGE_NAME: docker-mirror-monitor
         run: |
           set -euo pipefail
           regctl_path="${RUNNER_TEMP}/regctl"
@@ -51,12 +53,75 @@ jobs:
 
           for tag in v1.1 v1; do
             target="${IMAGE}:${tag}"
-            test "$(get_digest "$target")" = "$expected_digest"
-            "$regctl_path" --host "$host_arg" tag delete "$target"
+            current_tags="$("$regctl_path" --host "$host_arg" tag ls "$IMAGE")"
+            if ! grep -Fxq "$tag" <<< "$current_tags"; then
+              printf 'Tag is already absent: %s\n' "$tag"
+              continue
+            fi
+            target_digest="$(get_digest "$target")"
 
-            remaining_tags="$("$regctl_path" --host "$host_arg" tag ls "$IMAGE")"
+            if [[ "$target_digest" == "$expected_digest" ]]; then
+              delete_log="${RUNNER_TEMP}/regctl-delete-${tag}.log"
+              if "$regctl_path" --host "$host_arg" tag delete "$target" >"$delete_log" 2>&1; then
+                remaining_tags="$("$regctl_path" --host "$host_arg" tag ls "$IMAGE")"
+                if grep -Fxq "$tag" <<< "$remaining_tags"; then
+                  printf 'Registry reported success but tag still exists: %s\n' "$tag" >&2
+                  exit 1
+                fi
+                test "$(get_digest "$protected_version")" = "$expected_digest"
+                test "$(get_digest "$protected_latest")" = "$expected_digest"
+                printf 'Pruned %s with the registry tag-delete API\n' "$tag"
+                continue
+              fi
+
+              cat "$delete_log"
+              target_digest="$(get_digest "$target")"
+              if [[ "$target_digest" == "$expected_digest" ]]; then
+                printf 'Failed to isolate shared tag before package deletion: %s\n' "$tag" >&2
+                exit 1
+              fi
+            fi
+
+            matches='[]'
+            for _ in {1..10}; do
+              versions="$(gh api \
+                --header 'Accept: application/vnd.github+json' \
+                --header 'X-GitHub-Api-Version: 2022-11-28' \
+                "/users/${GITHUB_REPOSITORY_OWNER}/packages/container/${PACKAGE_NAME}/versions?per_page=100")"
+              matches="$(jq --arg tag "$tag" \
+                '[.[] | select(.metadata.container.tags | index($tag))]' <<< "$versions")"
+              if [[ "$(jq 'length' <<< "$matches")" == 1 ]]; then
+                break
+              fi
+              sleep 2
+            done
+
+            if [[ "$(jq 'length' <<< "$matches")" != 1 ]] ||
+               [[ "$(jq '.[0].metadata.container.tags | length' <<< "$matches")" != 1 ]] ||
+               [[ "$(jq -r '.[0].metadata.container.tags[0]' <<< "$matches")" != "$tag" ]]; then
+              printf 'Refusing to delete a package version that is not isolated to %s\n' "$tag" >&2
+              jq '[.[] | {id, name, tags: .metadata.container.tags}]' <<< "$matches" >&2
+              exit 1
+            fi
+
+            version_id="$(jq -r '.[0].id' <<< "$matches")"
+            version_name="$(jq -r '.[0].name' <<< "$matches")"
+            printf 'Deleting isolated package version id=%s name=%s tag=%s digest=%s\n' \
+              "$version_id" "$version_name" "$tag" "$target_digest"
+            gh api --method DELETE \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2022-11-28' \
+              "/users/${GITHUB_REPOSITORY_OWNER}/packages/container/${PACKAGE_NAME}/versions/${version_id}"
+
+            for _ in {1..10}; do
+              remaining_tags="$("$regctl_path" --host "$host_arg" tag ls "$IMAGE")"
+              if ! grep -Fxq "$tag" <<< "$remaining_tags"; then
+                break
+              fi
+              sleep 2
+            done
             if grep -Fxq "$tag" <<< "$remaining_tags"; then
-              printf 'Tag still exists after deletion: %s\n' "$tag" >&2
+              printf 'Tag still exists after package-version deletion: %s\n' "$tag" >&2
               exit 1
             fi
 
