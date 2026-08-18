@@ -1,0 +1,68 @@
+name: Prune Legacy GHCR Tags
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: prune-legacy-ghcr-tags
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    name: Remove v1.1 and v1 without deleting shared manifests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download verified regctl
+        env:
+          REGCTL_VERSION: v0.11.5
+          REGCTL_SHA256: c93aa7638749f5aaac1a8e01787321889c78f0101809bb2880343478d0ba0467
+        run: |
+          set -euo pipefail
+          regctl_path="${RUNNER_TEMP}/regctl"
+          curl --fail --silent --show-error --location --retry 3 \
+            "https://github.com/regclient/regclient/releases/download/${REGCTL_VERSION}/regctl-linux-amd64" \
+            --output "$regctl_path"
+          printf '%s  %s\n' "$REGCTL_SHA256" "$regctl_path" | sha256sum --check --strict -
+          chmod 0700 "$regctl_path"
+          "$regctl_path" version
+
+      - name: Prune legacy floating tags
+        env:
+          GHCR_PASSWORD: ${{ secrets.GPR_TOKEN || github.token }}
+          IMAGE: ghcr.io/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          regctl_path="${RUNNER_TEMP}/regctl"
+          host_arg="reg=ghcr.io,user=${GITHUB_ACTOR},pass=${GHCR_PASSWORD}"
+
+          get_digest() {
+            "$regctl_path" --host "$host_arg" manifest head "$1" --require-digest | tr -d '\r\n'
+          }
+
+          protected_version="${IMAGE}:v1.1.5"
+          protected_latest="${IMAGE}:latest"
+          expected_digest="$(get_digest "$protected_version")"
+          test "$(get_digest "$protected_latest")" = "$expected_digest"
+
+          for tag in v1.1 v1; do
+            target="${IMAGE}:${tag}"
+            test "$(get_digest "$target")" = "$expected_digest"
+            "$regctl_path" --host "$host_arg" tag delete "$target"
+
+            remaining_tags="$("$regctl_path" --host "$host_arg" tag ls "$IMAGE")"
+            if grep -Fxq "$tag" <<< "$remaining_tags"; then
+              printf 'Tag still exists after deletion: %s\n' "$tag" >&2
+              exit 1
+            fi
+
+            test "$(get_digest "$protected_version")" = "$expected_digest"
+            test "$(get_digest "$protected_latest")" = "$expected_digest"
+            printf 'Pruned %s while preserving digest %s\n' "$tag" "$expected_digest"
+          done
+
+          "$regctl_path" --host "$host_arg" tag ls "$IMAGE"
