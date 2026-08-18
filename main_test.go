@@ -15,6 +15,59 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+func TestFontAwesomeAssetsArePinned(t *testing.T) {
+	const (
+		version   = "7.3.1"
+		integrity = "sha384-qrALq7+6jBOZIQsNnT6xGkMDru64qD6uTlDra39xrt2SoXl4pO3FX6Roz/RpR/BS"
+	)
+
+	for _, assetURL := range []string{
+		"https://cdn.bootcdn.net/ajax/libs/font-awesome/" + version + "/css/all.min.css",
+		"https://cdnjs.cloudflare.com/ajax/libs/font-awesome/" + version + "/css/all.min.css",
+	} {
+		if !strings.Contains(htmlTemplate, assetURL) {
+			t.Errorf("html template is missing Font Awesome asset %q", assetURL)
+		}
+	}
+	if got := strings.Count(htmlTemplate, integrity); got != 2 {
+		t.Fatalf("Font Awesome integrity value appears %d times, want 2", got)
+	}
+	if strings.Contains(htmlTemplate, "font-awesome/5.") {
+		t.Fatal("html template still references Font Awesome 5")
+	}
+	if strings.Contains(htmlTemplate, `class="fa fa-`) || strings.Contains(htmlTemplate, "className = 'fa ") {
+		t.Fatal("html template still contains legacy built-in Font Awesome classes")
+	}
+}
+
+func TestDefaultIconClassesUseFontAwesomeSevenSyntax(t *testing.T) {
+	config := &Config{}
+	config.Server.SiteNotice.Enabled = true
+	config.fillDefaultSiteNotice()
+	config.fillDefaultSite()
+
+	if got, want := config.Server.SiteNotice.Icon, "fa-classic fa-solid fa-bullhorn"; got != want {
+		t.Fatalf("site notice icon = %q, want %q", got, want)
+	}
+	if got, want := config.Server.Site.LogoIcon, "fa-brands fa-docker"; got != want {
+		t.Fatalf("site logo icon = %q, want %q", got, want)
+	}
+}
+
+func TestVersionInfo(t *testing.T) {
+	originalVersion, originalBuildTime := Version, BuildTime
+	t.Cleanup(func() {
+		Version = originalVersion
+		BuildTime = originalBuildTime
+	})
+
+	Version = "v1.2.3"
+	BuildTime = "20260818094552"
+	if got, want := versionInfo(), "docker-mirror-monitor v1.2.3 (built 20260818094552)"; got != want {
+		t.Fatalf("versionInfo() = %q, want %q", got, want)
+	}
+}
+
 func TestReloadRequestAuthorization(t *testing.T) {
 	tests := []struct {
 		name       string

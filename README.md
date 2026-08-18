@@ -165,7 +165,7 @@ server:
   # 站点配置
   site:
     logo: "容器镜像监控"        # Header左侧Logo文字
-    logo_icon: "fab fa-docker"  # Logo图标（需带 fab/fas 前缀）
+    logo_icon: "fa-brands fa-docker"  # Logo图标（品牌图标使用 fa-brands）
     title: "容器镜像加速器监控"  # 页面主标题
     description: "实时监控多种容器镜像源的加速器状态"  # 页面描述
     browser_title: "容器镜像监控"  # 浏览器标签页标题
@@ -176,7 +176,7 @@ server:
     enabled: false              # 是否启用
     text: "限时优惠！"          # 公告文字
     url: ""                     # 点击跳转链接
-    icon: "fas fa-tag"          # 增加 fas 前缀
+    icon: "fa-classic fa-solid fa-tag" # 实心图标使用 fa-classic fa-solid
     color: "#ff6b6b"            # 文字颜色
     bg_color: "rgba(255,107,107,0.1)"  # 背景颜色
   
@@ -308,7 +308,7 @@ proxy: "socks5://username:password@127.0.0.1:1080"
 | 配置项 | 类型 | 说明 | 默认值 |
 |--------|------|------|--------|
 | `logo` | string | Header左侧Logo文字 | `"容器镜像监控"` |
-| `logo_icon` | string | Logo图标（Font Awesome） | `"fa-docker"` |
+| `logo_icon` | string | Logo图标（Font Awesome） | `"fa-brands fa-docker"` |
 | `title` | string | 页面主标题 | `"容器镜像加速器监控"` |
 | `description` | string | 页面描述 | `"实时监控多种容器镜像源..."` |
 | `browser_title` | string | 浏览器标签页标题 | `"容器镜像监控"` |
@@ -317,7 +317,7 @@ proxy: "socks5://username:password@127.0.0.1:1080"
 ```yaml
 site:
   logo: "我的监控"
-  logo_icon: "fa-server"
+  logo_icon: "fa-classic fa-solid fa-server"
   title: "Docker镜像源监控"
   description: "自建镜像监控系统"
   browser_title: "镜像监控"
@@ -331,7 +331,7 @@ site:
 | `enabled` | bool | 是否启用 | `false` |
 | `text` | string | 公告文字 | `"站点公告"` |
 | `url` | string | 点击跳转链接 | `""` |
-| `icon` | string | Font Awesome图标 | `"fas fa-bullhorn"` |
+| `icon` | string | Font Awesome图标 | `"fa-classic fa-solid fa-bullhorn"` |
 | `color` | string | 文字颜色 | `"#ff6b6b"` |
 | `bg_color` | string | 背景颜色 | `"rgba(255,107,107,0.1)"` |
 
@@ -340,7 +340,7 @@ site_notice:
   enabled: true
   text: "🎉 限时优惠活动"
   url: "https://example.com/promo"
-  icon: "fas fa-bullhorn"
+  icon: "fa-classic fa-solid fa-bullhorn"
   color: "#ff6b6b"
   bg_color: "rgba(255,107,107,0.12)"
 ```
@@ -548,7 +548,7 @@ make docker-multi
 docker buildx build \
   --platform linux/amd64,linux/arm64,linux/arm/v7,linux/ppc64le,linux/s390x \
   -t your-registry/container-mirror-monitor:latest \
-  -t your-registry/container-mirror-monitor:1.0.0 \
+  -t your-registry/container-mirror-monitor:v1.1.5 \
   --push .
 
 # 方式三：仅构建 amd64 并加载到本地
@@ -598,8 +598,14 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 # 编译当前平台
 make build
 
+# 查看版本与构建时间
+./docker-mirror-monitor version
+
 # 编译所有平台（输出到 dist/ 目录）
 make build-all
+
+# 需要显式指定版本时可覆盖自动推导值
+make build VERSION=v1.1.5
 
 # 手动编译指定平台
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o docker-mirror-monitor main.go
@@ -626,31 +632,43 @@ CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o docker-mirro
 
 ## GitHub Actions CI/CD
 
-项目提供两个 GitHub Actions workflow，实现自动化构建和发布。
+项目提供三个 GitHub Actions workflow，实现自动化检查、构建和发布。
 
 ### Workflow 文件
 
 ```
 .github/workflows/
-├── build-docker-image.yml  # 发布版本时构建并推送 Docker 镜像
-└── release-binaries.yml    # 手动触发或发布版本时编译二进制文件
+├── ci.yml                  # PR 与 main 分支的质量、安全检查
+├── build-docker-image.yml  # 发布、定时或手动构建并推送 Docker 镜像
+└── release-binaries.yml    # 发布版本时编译二进制文件并创建 Release
 ```
 
 ### build-docker-image.yml - 构建 Docker 镜像
 
 **触发条件：**
 - 推送以 `v` 开头的 Tag（如 `v1.0.0`）
+- 每周一定时重建 `latest`，纳入基础镜像的软件包安全更新
 - 手动触发（workflow_dispatch）
 
 **执行内容：**
-1. **构建 Docker 镜像** - 支持多架构（linux/amd64, linux/arm64, linux/arm/v7, linux/ppc64le, linux/s390x）
-2. **推送镜像** - 推送到 GitHub Container Registry (GHCR)
+1. **安全扫描** - 先构建 amd64 镜像并通过 Trivy 漏洞门禁
+2. **构建 Docker 镜像** - 支持多架构（linux/amd64, linux/arm64, linux/arm/v7, linux/ppc64le, linux/s390x）
+3. **推送镜像** - 同步推送到 GitHub Container Registry (GHCR) 和 Docker Hub
+
+### ci.yml - 代码质量与安全检查
+
+**触发条件：**
+- 向 `main` 提交 Pull Request
+- 推送到 `main`
+
+**执行内容：**
+1. **Go 质量检查** - race test、vet、govulncheck
+2. **仓库安全扫描** - Trivy 文件系统、配置和敏感信息扫描
 
 ### release-binaries.yml - 编译二进制文件
 
 **触发条件：**
 - 推送以 `v` 开头的 Tag（如 `v1.0.0`）
-- 手动触发（workflow_dispatch）
 
 **执行内容：**
 1. **编译二进制文件** - 8 个平台，生成 SHA256 校验文件
@@ -700,7 +718,7 @@ git push origin v1.0.0
 docker pull ghcr.io/okxlin/docker-mirror-monitor:latest
 
 # 拉取指定版本
-docker pull ghcr.io/okxlin/docker-mirror-monitor:1.1.2
+docker pull ghcr.io/okxlin/docker-mirror-monitor:v1.1.5
 
 # 支持架构：linux/amd64, linux/arm64, linux/arm/v7, linux/ppc64le, linux/s390x
 ```
@@ -856,13 +874,13 @@ server {
 
 1.  **Font Awesome 图标**（推荐）：
     ```yaml
-    logo_icon: "fab fa-docker"  # 品牌图标
-    logo_icon: "fas fa-server"  # 实心图标
+    logo_icon: "fa-brands fa-docker"          # 品牌图标
+    logo_icon: "fa-classic fa-solid fa-server" # 实心图标
     ```
 
-> **注意**：本项目使用 Font Awesome 5，请务必添加正确的风格前缀：
-> * **品牌图标** (GitHub, Docker, 微信)：使用 **`fab`** (如 `fab fa-weixin`)
-> * **常规图标** (Home, Server, Link)：使用 **`fas`** (如 `fas fa-link`)
+> **注意**：本项目使用 Font Awesome 7，请添加正确的图标族和样式类：
+> * **品牌图标** (GitHub, Docker, 微信)：使用 **`fa-brands`** (如 `fa-brands fa-weixin`)
+> * **常规图标** (Home, Server, Link)：使用 **`fa-classic fa-solid`** (如 `fa-classic fa-solid fa-link`)
 
 2.  **网络图片**：
     ```yaml
