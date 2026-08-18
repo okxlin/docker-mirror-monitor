@@ -1,8 +1,9 @@
 # Docker Mirror Monitor - Makefile
 APP_NAME := docker-mirror-monitor
-VERSION := 1.0.0
-BUILD_TIME := $(shell date +%Y%m%d%H%M%S)
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || printf 'dev')
+BUILD_TIME ?= $(shell date -u +%Y%m%d%H%M%S)
 DOCKER_IMAGE := docker-mirror-monitor
+.DEFAULT_GOAL := help
 
 # Supported platforms
 PLATFORMS := linux/amd64,linux/arm64,linux/arm/v7,linux/ppc64le,linux/s390x
@@ -10,7 +11,9 @@ PLATFORMS := linux/amd64,linux/arm64,linux/arm/v7,linux/ppc64le,linux/s390x
 # Go build flags
 LDFLAGS := -ldflags="-s -w -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)"
 
-.PHONY: all build clean docker docker-multi run help
+.PHONY: all help build build-all build-linux-amd64 build-linux-arm64 build-linux-armv7 build-linux-ppc64le build-linux-s390x build-windows build-darwin build-darwin-arm64 docker docker-multi docker-local run clean
+
+all: build
 
 help:
 	@echo "Usage:"
@@ -54,11 +57,13 @@ build-darwin-arm64:
 
 # Build Docker image (single arch)
 docker:
-	docker build -t $(DOCKER_IMAGE):$(VERSION) -t $(DOCKER_IMAGE):latest .
+	docker build --build-arg VERSION="$(VERSION)" --build-arg BUILD_TIME="$(BUILD_TIME)" -t $(DOCKER_IMAGE):$(VERSION) -t $(DOCKER_IMAGE):latest .
 
 # Build multi-arch Docker image and push
 docker-multi:
 	docker buildx build --platform $(PLATFORMS) \
+		--build-arg VERSION="$(VERSION)" \
+		--build-arg BUILD_TIME="$(BUILD_TIME)" \
 		-t $(DOCKER_IMAGE):$(VERSION) \
 		-t $(DOCKER_IMAGE):latest \
 		--push .
@@ -66,6 +71,8 @@ docker-multi:
 # Build multi-arch and load locally (only works for single arch at a time)
 docker-local:
 	docker buildx build --platform linux/amd64 \
+		--build-arg VERSION="$(VERSION)" \
+		--build-arg BUILD_TIME="$(BUILD_TIME)" \
 		-t $(DOCKER_IMAGE):$(VERSION) \
 		-t $(DOCKER_IMAGE):latest \
 		--load .

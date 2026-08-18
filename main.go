@@ -26,7 +26,19 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const apiTokenEnv = "DMM_API_TOKEN"
+const (
+	apiTokenEnv = "DMM_API_TOKEN"
+	appName     = "docker-mirror-monitor"
+)
+
+var (
+	Version   = "dev"
+	BuildTime = "unknown"
+)
+
+func versionInfo() string {
+	return fmt.Sprintf("%s %s (built %s)", appName, Version, BuildTime)
+}
 
 // TagColor 标签颜色配置
 type TagColor struct {
@@ -1028,7 +1040,7 @@ func (c *Config) fillDefaultSiteNotice() {
 			c.Server.SiteNotice.BgColor = "rgba(255,107,107,0.1)"
 		}
 		if c.Server.SiteNotice.Icon == "" {
-			c.Server.SiteNotice.Icon = "fas fa-bullhorn"
+			c.Server.SiteNotice.Icon = "fa-classic fa-solid fa-bullhorn"
 		}
 	}
 }
@@ -1040,7 +1052,7 @@ func (c *Config) fillDefaultSite() {
 	}
 	if c.Server.Site.LogoIcon == "" {
 		// 修改默认值为完整的类名
-		c.Server.Site.LogoIcon = "fab fa-docker"
+		c.Server.Site.LogoIcon = "fa-brands fa-docker"
 	}
 	if c.Server.Site.Title == "" {
 		c.Server.Site.Title = "容器镜像加速器监控"
@@ -1088,7 +1100,7 @@ const htmlTemplate = `<!DOCTYPE html>
     <title>{{.Site.BrowserTitle}}</title>
     {{if .Site.Favicon}}<link rel="icon" href="{{.Site.Favicon}}" type="image/x-icon">{{end}}
     
-    <link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/font-awesome/5.15.4/css/all.min.css" onerror="loadFallbackCSS()">
+    <link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/font-awesome/7.3.1/css/all.min.css" integrity="sha384-qrALq7+6jBOZIQsNnT6xGkMDru64qD6uTlDra39xrt2SoXl4pO3FX6Roz/RpR/BS" crossorigin="anonymous" referrerpolicy="no-referrer" onerror="loadFallbackCSS()">
     
     <script>
         function loadFallbackCSS() {
@@ -1096,7 +1108,10 @@ const htmlTemplate = `<!DOCTYPE html>
             var link = document.createElement('link');
             link.rel = 'stylesheet';
             // 备用源：使用 cdnjs (Cloudflare)
-            link.href = 'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css';
+            link.href = 'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/7.3.1/css/all.min.css';
+            link.integrity = 'sha384-qrALq7+6jBOZIQsNnT6xGkMDru64qD6uTlDra39xrt2SoXl4pO3FX6Roz/RpR/BS';
+            link.crossOrigin = 'anonymous';
+            link.referrerPolicy = 'no-referrer';
             document.head.appendChild(link);
         }
     </script>
@@ -2232,9 +2247,9 @@ const htmlTemplate = `<!DOCTYPE html>
                     </div>
                     <div class="theme-selector">
 						<button type="button" class="theme-selector-btn" id="theme-selector-btn" title="选择主题" aria-expanded="false" aria-controls="theme-dropdown">
-                            <i class="fa fa-paint-brush"></i>
+                            <i class="fa-classic fa-solid fa-paint-brush"></i>
                             <span id="current-theme-name">紫蓝渐变</span>
-                            <i class="fa fa-angle-down"></i>
+                            <i class="fa-classic fa-solid fa-angle-down"></i>
                         </button>
                         <div class="theme-dropdown" id="theme-dropdown">
 							<button type="button" class="theme-option active" data-theme="default" aria-pressed="true">
@@ -2248,7 +2263,7 @@ const htmlTemplate = `<!DOCTYPE html>
 						</div>
 					</div>
 					<button type="button" id="theme-toggle" title="切换深色/浅色模式" aria-label="切换深色或浅色模式">
-                        <i class="fa fa-moon"></i>
+                        <i class="fa-classic fa-solid fa-moon"></i>
                     </button>
                 </div>
             </div>
@@ -2265,7 +2280,7 @@ const htmlTemplate = `<!DOCTYPE html>
 			<button type="button" class="tab-btn{{if eq $index 0}} active{{end}}" data-group="{{$group.ID}}">{{$group.Name}}</button>
             {{end}}
             {{if .About.Enabled}}
-			<button type="button" class="tab-btn" data-group="about"><i class="fa fa-info-circle"></i> {{if .About.Title}}{{.About.Title}}{{else}}关于{{end}}</button>
+			<button type="button" class="tab-btn" data-group="about"><i class="fa-classic fa-solid fa-info-circle"></i> {{if .About.Title}}{{.About.Title}}{{else}}关于{{end}}</button>
             {{end}}
         </nav>
 
@@ -2280,7 +2295,7 @@ const htmlTemplate = `<!DOCTYPE html>
                             <p class="stat-label">总监控站点</p>
                             <h3 class="stat-value stat-total">{{$group.Total}}</h3>
                         </div>
-                        <div class="stat-icon total"><i class="fa fa-sitemap"></i></div>
+                        <div class="stat-icon total"><i class="fa-classic fa-solid fa-sitemap"></i></div>
                     </div>
                 </div>
                 <div class="stat-card gradient-success">
@@ -2289,7 +2304,7 @@ const htmlTemplate = `<!DOCTYPE html>
                             <p class="stat-label">健康</p>
                             <h3 class="stat-value stat-healthy">{{$group.Healthy}}</h3>
                         </div>
-                        <div class="stat-icon online"><i class="fa fa-check-circle"></i></div>
+                        <div class="stat-icon online"><i class="fa-classic fa-solid fa-check-circle"></i></div>
                     </div>
                 </div>
                 <div class="stat-card gradient-warning">
@@ -2298,7 +2313,7 @@ const htmlTemplate = `<!DOCTYPE html>
                             <p class="stat-label">慢速</p>
                             <h3 class="stat-value stat-slow">{{$group.Slow}}</h3>
                         </div>
-                        <div class="stat-icon slow"><i class="fa fa-clock"></i></div>
+                        <div class="stat-icon slow"><i class="fa-classic fa-solid fa-clock"></i></div>
                     </div>
                 </div>
                 <div class="stat-card gradient-danger">
@@ -2307,7 +2322,7 @@ const htmlTemplate = `<!DOCTYPE html>
                             <p class="stat-label">异常</p>
                             <h3 class="stat-value stat-abnormal">{{$group.Abnormal}}</h3>
                         </div>
-                        <div class="stat-icon offline"><i class="fa fa-times-circle"></i></div>
+                        <div class="stat-icon offline"><i class="fa-classic fa-solid fa-times-circle"></i></div>
                     </div>
                 </div>
             </div>
@@ -2329,7 +2344,7 @@ const htmlTemplate = `<!DOCTYPE html>
                 <div class="mirror-selection-header">
                     <h4 class="mirror-selection-title">选择在线镜像源</h4>
                     <div class="mirror-selection-actions">
-						<button type="button" class="btn-sm btn-success use-recommended"><i class="fa fa-star"></i> 使用推荐配置</button>
+						<button type="button" class="btn-sm btn-success use-recommended"><i class="fa-classic fa-solid fa-star"></i> 使用推荐配置</button>
 						<button type="button" class="btn-sm btn-primary select-all-online">全选在线</button>
 						<button type="button" class="btn-sm btn-secondary clear-selection">清空选择</button>
                     </div>
@@ -2350,11 +2365,11 @@ const htmlTemplate = `<!DOCTYPE html>
 					</label>
                     {{end}}
                 </div>
-                <p class="mirror-hint"><i class="fa fa-info-circle"></i> 建议选择 3-5 个镜像源以保证稳定性</p>
+                <p class="mirror-hint"><i class="fa-classic fa-solid fa-info-circle"></i> 建议选择 3-5 个镜像源以保证稳定性</p>
 
                 <div class="config-output-header">
                     <h4 class="mirror-selection-title">生成的配置</h4>
-					<button type="button" class="btn-sm btn-success copy-config"><i class="fa fa-copy"></i> 复制配置</button>
+					<button type="button" class="btn-sm btn-success copy-config"><i class="fa-classic fa-solid fa-copy"></i> 复制配置</button>
                 </div>
                 <div class="code-block">
                     <pre><code class="config-output"></code></pre>
@@ -2421,7 +2436,7 @@ const htmlTemplate = `<!DOCTYPE html>
             <!-- 默认关于页面 -->
             <div class="about-section">
                 <div class="about-intro card">
-                    <h3 class="card-title"><i class="fa fa-info-circle"></i> 项目介绍</h3>
+                    <h3 class="card-title"><i class="fa-classic fa-solid fa-info-circle"></i> 项目介绍</h3>
                     <div class="about-description">
                         {{if .About.Description}}{{safeHTML .About.Description}}{{else}}
                         <p>容器镜像监控系统是一个开源项目，帮助开发者实时监控各种容器镜像加速器的可用性和响应速度。</p>
@@ -2431,7 +2446,7 @@ const htmlTemplate = `<!DOCTYPE html>
 
                 {{if .About.Donate.Enabled}}
                 <div class="about-donate card">
-                    <h3 class="card-title"><i class="fa fa-heart"></i> {{if .About.Donate.Title}}{{.About.Donate.Title}}{{else}}支持本项目{{end}}</h3>
+                    <h3 class="card-title"><i class="fa-classic fa-solid fa-heart"></i> {{if .About.Donate.Title}}{{.About.Donate.Title}}{{else}}支持本项目{{end}}</h3>
                     {{if .About.Donate.Description}}
                     <p class="donate-desc">{{.About.Donate.Description}}</p>
                     {{end}}
@@ -2440,7 +2455,7 @@ const htmlTemplate = `<!DOCTYPE html>
                         {{range .About.Donate.Items}}
                         <div class="donate-item" style="{{if .Color}}border-color: {{.Color}}{{end}}">
                             <div class="donate-header">
-                                <i class="{{if .Icon}}{{.Icon}}{{else}}fa-gift{{end}}" style="{{if .Color}}color: {{.Color}}{{end}}"></i>
+                                <i class="{{if .Icon}}{{.Icon}}{{else}}fa-classic fa-solid fa-gift{{end}}" style="{{if .Color}}color: {{.Color}}{{end}}"></i>
                                 <span>{{.Name}}</span>
                             </div>
                             {{if .QRCode}}
@@ -2458,7 +2473,7 @@ const htmlTemplate = `<!DOCTYPE html>
                 {{if .About.Partners.Enabled}}
                 {{if .About.Partners.Items}}
                 <div class="about-partners card">
-                    <h3 class="card-title"><i class="fa fa-bullhorn"></i> 推荐服务</h3>
+                    <h3 class="card-title"><i class="fa-classic fa-solid fa-bullhorn"></i> 推荐服务</h3>
                     <div class="partners-grid">
                         {{range .About.Partners.Items}}
                         <a href="{{.URL}}" target="_blank" rel="noopener" class="partner-item" style="{{if .Color}}border-color: {{.Color}}{{end}}">
@@ -2478,11 +2493,11 @@ const htmlTemplate = `<!DOCTYPE html>
 
                 {{if .About.Links}}
                 <div class="about-links card">
-                    <h3 class="card-title"><i class="fa fa-link"></i> 相关链接</h3>
+                    <h3 class="card-title"><i class="fa-classic fa-solid fa-link"></i> 相关链接</h3>
                     <div class="links-grid">
                         {{range .About.Links}}
                         <a href="{{.URL}}" target="_blank" rel="noopener" class="link-item">
-                            <i class="{{if .Icon}}{{.Icon}}{{else}}fa-external-link{{end}}"></i>
+                            <i class="{{if .Icon}}{{.Icon}}{{else}}fa-classic fa-solid fa-external-link{{end}}"></i>
                             <span>{{.Name}}</span>
                         </a>
                         {{end}}
@@ -2492,13 +2507,13 @@ const htmlTemplate = `<!DOCTYPE html>
 
                 {{if .About.Disclaimer.Enabled}}
                 <div class="about-disclaimer card">
-                    <h3 class="card-title"><i class="fa fa-exclamation-triangle"></i> {{if .About.Disclaimer.Title}}{{.About.Disclaimer.Title}}{{else}}免责声明{{end}}</h3>
+                    <h3 class="card-title"><i class="fa-classic fa-solid fa-exclamation-triangle"></i> {{if .About.Disclaimer.Title}}{{.About.Disclaimer.Title}}{{else}}免责声明{{end}}</h3>
                     <div class="disclaimer-content">
                         {{if .About.Disclaimer.Content}}{{safeHTML .About.Disclaimer.Content}}{{end}}
                     </div>
                     {{if .About.Disclaimer.AIGenerated}}
                     <div class="ai-generated-badge">
-                        <i class="fa fa-robot"></i> {{if .About.Disclaimer.AIStatement}}{{.About.Disclaimer.AIStatement}}{{else}}本项目由 AI 辅助生成{{end}}
+                        <i class="fa-classic fa-solid fa-robot"></i> {{if .About.Disclaimer.AIStatement}}{{.About.Disclaimer.AIStatement}}{{else}}本项目由 AI 辅助生成{{end}}
                     </div>
                     {{end}}
                 </div>
@@ -2538,7 +2553,7 @@ const htmlTemplate = `<!DOCTYPE html>
 			const toast = document.createElement('div');
 			toast.className = 'toast ' + type;
 			const icon = document.createElement('i');
-			icon.className = 'fa ' + (type === 'success' ? 'fa-check-circle' : 'fa-times-circle');
+			icon.className = 'fa-classic fa-solid ' + (type === 'success' ? 'fa-check-circle' : 'fa-times-circle');
 			const text = document.createElement('span');
 			text.textContent = message;
 			toast.append(icon, text);
@@ -2574,7 +2589,7 @@ const htmlTemplate = `<!DOCTYPE html>
         
         function setDarkMode(dark) {
             document.body.classList.toggle('dark', dark);
-            themeIcon.className = dark ? 'fa fa-sun' : 'fa fa-moon';
+            themeIcon.className = dark ? 'fa-classic fa-solid fa-sun' : 'fa-classic fa-solid fa-moon';
             localStorage.setItem('darkMode', dark ? 'dark' : 'light');
         }
         
@@ -3307,7 +3322,12 @@ func resolveConfigPath(configPath, configShort string) string {
 func main() {
 	configPath := flag.String("config", "config.yaml", "配置文件路径")
 	configShort := flag.String("c", "config.yaml", "配置文件路径")
+	showVersion := flag.Bool("version", false, "显示版本信息")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(versionInfo())
+		return
+	}
 
 	// 使用 -c 参数优先，如果没有指定 -c 则使用 --config
 	actualConfigPath := resolveConfigPath(*configPath, *configShort)
@@ -3315,6 +3335,10 @@ func main() {
 	// 检查是否有额外的命令行参数
 	args := flag.Args()
 	if len(args) > 0 {
+		if args[0] == "version" {
+			fmt.Println(versionInfo())
+			return
+		}
 		if args[0] == "healthcheck" {
 			// 设置默认值
 			listenAddr := ":9080"

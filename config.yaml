@@ -8,16 +8,16 @@ server:
   # 站点配置
   site:
     logo: "容器镜像监控"            # Header左侧Logo文字
-    logo_icon: "fab fa-docker"          # Logo图标（支持Font Awesome类名或图片路径）
+    logo_icon: "fa-brands fa-docker"    # Logo图标（支持Font Awesome类名或图片路径）
     # Logo图标支持多种格式：
-    # 1. Font Awesome图标: "fab fa-docker", "fas fa-cube", "fas fa-server" 等
+    # 1. Font Awesome图标: "fa-brands fa-docker", "fa-classic fa-solid fa-cube", "fa-classic fa-solid fa-server" 等
     # 2. 本地图片: "/custom/logo.png", "/custom/my-icon.svg" (需放在 ./data/public/ 目录下)
     # 3. 网络图片: "https://example.com/logo.png"
     # 4. Base64图片: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA..."
     # 
-    # 提示：Font Awesome 5 图标请注意前缀：
-    # * 品牌图标（如 Docker, GitHub, 微信）：使用 **fab** (例如 fab fa-weixin)
-    # * 常规图标（如 首页, 设置）：使用 **fas** (例如 fas fa-home)
+    # 提示：Font Awesome 7 图标请注意图标族和样式类：
+    # * 品牌图标（如 Docker, GitHub, 微信）：使用 **fa-brands** (例如 fa-brands fa-weixin)
+    # * 常规图标（如 首页, 设置）：使用 **fa-classic fa-solid** (例如 fa-classic fa-solid fa-home)
     title: "容器镜像加速器监控"      # 页面主标题
     description: "实时监控多种容器镜像源的加速器状态，帮助开发者选择最佳的镜像源"  # 页面描述
     browser_title: "容器镜像监控"   # 浏览器标签页标题
@@ -65,14 +65,14 @@ server:
     #enabled: false              # 是否启用顶部公告
     #text: "站点公告"             # 公告文字
     #url: ""                     # 点击跳转链接
-    #icon: "fas fa-bullhorn"         # Font Awesome图标（可选，建议用fa-bullhorn或fa-bell）
+    #icon: "fa-classic fa-solid fa-bullhorn" # Font Awesome图标（可选，建议用fa-bullhorn或fa-bell）
     #color: "#ff6b6b"            # 文字颜色
     #bg_color: "rgba(255,107,107,0.1)"  # 背景颜色
     # 示例配置:
     enabled: true
     text: "1Panel & Halo 限时优惠 🎉"
     url: "https://www.lxware.cn?code=sssvip"
-    icon: "fas fa-gift"
+    icon: "fa-classic fa-solid fa-gift"
     color: "#ff6b6b"
     bg_color: "rgba(255,107,107,0.1)"
 
@@ -191,11 +191,11 @@ server:
       # 捐赠方式列表
       items: []
         # - name: "微信支付"
-        #   icon: "fab fa-weixin"     # 品牌图标使用 fab
+        #   icon: "fa-brands fa-weixin" # 品牌图标使用 fa-brands
         #   qrcode: ""                # 二维码图片URL或base64
         #   color: "#07c160"
         # - name: "支付宝"
-        #   icon: "fab fa-alipay"     # 支付宝也有专门的图标
+        #   icon: "fa-brands fa-alipay" # 支付宝也有专门的图标
         #   qrcode: ""
         #   color: "#1677ff"
     
@@ -213,10 +213,10 @@ server:
     links:
       # - name: "GitHub"
       #   url: "https://github.com/xxx"
-      #   icon: "fab fa-github"       # 品牌图标使用 fab
+      #   icon: "fa-brands fa-github" # 品牌图标使用 fa-brands
       # - name: "文档"
       #   url: "https://docs.example.com"
-      #   icon: "fas fa-book"         # 通用图标使用 fas
+      #   icon: "fa-classic fa-solid fa-book" # 通用图标使用 fa-classic fa-solid
     
     # 免责声明配置
     disclaimer:
