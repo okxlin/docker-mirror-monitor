@@ -112,8 +112,6 @@ jobs:
             latest=false
           tags: |
             type=semver,pattern=v{{version}}
-            type=semver,pattern=v{{major}}.{{minor}}
-            type=semver,pattern=v{{major}}
             type=raw,value=${{ inputs.version_tag }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.version_tag != '' }}
             type=raw,value=latest,enable=${{ github.event_name != 'workflow_dispatch' || inputs.make_latest }}
 
