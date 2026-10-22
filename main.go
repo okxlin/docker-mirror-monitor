@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -434,7 +435,10 @@ func createProxyTransport(proxyAddr string) *http.Transport {
 		}
 
 		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return dialer.Dial(network, addr)
+			// net/http may keep a dial alive after the request has timed out.
+			ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			return dialer.(proxy.ContextDialer).DialContext(ctx, network, addr)
 		}
 		log.Printf("使用SOCKS5代理: %s", proxyURL.Host)
 
@@ -479,6 +483,10 @@ func (m *Monitor) ReloadConfig() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if m.config.Server.Listen != newConfig.Server.Listen || m.config.Server.TLS != newConfig.Server.TLS {
+		return fmt.Errorf("监听地址或 TLS 配置变更需要重启服务")
+	}
+
 	// 检查代理配置是否改变
 	if m.config.Server.Proxy != newConfig.Server.Proxy {
 		oldProxy := m.config.Server.Proxy
@@ -499,22 +507,33 @@ func (m *Monitor) ReloadConfig() error {
 		}
 	}
 
-	// 更新配置
-	m.config = newConfig
+	oldTargets := make(map[[2]string]Target)
+	for _, group := range m.config.Groups {
+		for _, target := range group.Targets {
+			oldTargets[[2]string{group.ID, target.Name}] = target
+		}
+	}
+	preserveResults := m.config.Server.Proxy == newConfig.Server.Proxy &&
+		m.config.Server.UserAgent == newConfig.Server.UserAgent &&
+		m.config.Server.SlowThreshold == newConfig.Server.SlowThreshold
 
-	// 重建结果存储（保留已有结果）
+	// Only retain results produced for the same target and probe settings.
 	newResults := make(map[string]map[string]*Result)
 	for _, group := range newConfig.Groups {
 		newResults[group.ID] = make(map[string]*Result)
 		// 尝试保留旧结果
-		if oldGroupResults, ok := m.results[group.ID]; ok {
+		if oldGroupResults, ok := m.results[group.ID]; ok && preserveResults {
 			for _, target := range group.Targets {
-				if oldResult, ok := oldGroupResults[target.Name]; ok {
+				oldTarget, exists := oldTargets[[2]string{group.ID, target.Name}]
+				if oldResult, ok := oldGroupResults[target.Name]; ok && exists &&
+					oldTarget.URL == target.URL && oldTarget.Method == target.Method &&
+					oldTarget.Timeout == target.Timeout && slices.Equal(oldTarget.Tags, target.Tags) {
 					newResults[group.ID][target.Name] = oldResult
 				}
 			}
 		}
 	}
+	m.config = newConfig
 	m.results = newResults
 
 	log.Printf("配置热加载成功: %d 个分组, 共 %d 个监控目标", len(newConfig.Groups), countTargets(newConfig))
@@ -699,10 +718,10 @@ func (m *Monitor) probeAll() {
 				result := m.Probe(job.target)
 
 				m.mu.Lock()
-				if m.results[job.groupID] == nil {
-					m.results[job.groupID] = make(map[string]*Result)
+				// A reload replaces the immutable config snapshot. Discard old probes.
+				if m.config == config {
+					m.results[job.groupID][job.target.Name] = result
 				}
-				m.results[job.groupID][job.target.Name] = result
 				m.mu.Unlock()
 			}
 		}()
@@ -893,6 +912,10 @@ func ValidateConfig(config *Config) error {
 	}
 	if config.Server.SlowThreshold < 0 {
 		return fmt.Errorf("slow_threshold 不能为负数")
+	}
+	if config.Server.TLS.Enabled &&
+		(strings.TrimSpace(config.Server.TLS.CertFile) == "" || strings.TrimSpace(config.Server.TLS.KeyFile) == "") {
+		return fmt.Errorf("启用 TLS 时必须同时配置 cert_file 和 key_file")
 	}
 	if config.Server.Proxy != "" {
 		proxyURL, err := url.Parse(config.Server.Proxy)
@@ -2285,7 +2308,7 @@ const htmlTemplate = `<!DOCTYPE html>
         </nav>
 
         {{range $index, $group := .Groups}}
-        <div class="group-content{{if eq $index 0}} active{{end}}" id="group-{{$group.ID}}" data-group-id="{{$group.ID}}" data-official-url="{{$group.OfficialURL}}">
+        <div class="group-content{{if eq $index 0}} active{{end}}" id="group-{{$group.ID}}" data-group-id="{{$group.ID}}" data-official-url="{{$group.OfficialURL}}" data-official-source="{{$group.OfficialURL}}">
             <p class="group-desc">{{$group.Description}}</p>
 
             <div class="stats-grid">
@@ -2731,16 +2754,22 @@ const htmlTemplate = `<!DOCTYPE html>
 		};
 
 		function pageStructureMatches(data) {
+			const normalizeHTMLText = value => value.replace(/\r\n?/g, '\n').replace(/\u0000/g, '\uFFFD');
 			const renderedGroups = Array.from(document.querySelectorAll('.group-content[data-official-url]'));
 			if (renderedGroups.length !== data.groups.length) return false;
 
 			return data.groups.every((group, groupIndex) => {
 				const groupEl = renderedGroups[groupIndex];
-				if (groupEl.dataset.groupId !== group.id) return false;
+				if (groupEl.dataset.groupId !== group.id || groupEl.dataset.officialSource !== normalizeHTMLText(group.official_url)) return false;
 
 				const rows = Array.from(groupEl.querySelectorAll('.status-tbody tr'));
 				return rows.length === group.results.length && group.results.every((result, index) => {
-					return rows[index].dataset.name === result.name;
+					const row = rows[index];
+					const urlButton = row.querySelector('.site-url');
+					const tags = Array.from(row.querySelectorAll('.tags .tag'), tag => tag.textContent);
+					const resultTags = (result.tags || []).map(normalizeHTMLText);
+					return row.dataset.name === normalizeHTMLText(result.name) && urlButton?.textContent === result.url &&
+						tags.length === resultTags.length && tags.every((tag, tagIndex) => tag === resultTags[tagIndex]);
 				});
 			});
 		}
@@ -2907,7 +2936,7 @@ const htmlTemplate = `<!DOCTYPE html>
 			if (!configOutput) return;
 			const type = configType ? configType.value : 'docker';
 			const registry = getRegistryDomain(groupId);
-			const safeRegistry = escapeHTML(registry);
+			const safeRegistry = escapeHTML(JSON.stringify(registry));
 			let config = '';
 
 			if (mirrors.length === 0) {
@@ -2935,36 +2964,36 @@ const htmlTemplate = `<!DOCTYPE html>
                 config += '{\n';
 				config += '    <span class="key">"registry-mirrors"</span>: [\n';
 				mirrors.forEach((m, i) => {
-					config += '        <span class="string">"' + escapeHTML(m) + '"</span>' + (i < mirrors.length - 1 ? ',' : '') + '\n';
+					config += '        <span class="string">' + escapeHTML(JSON.stringify(m)) + '</span>' + (i < mirrors.length - 1 ? ',' : '') + '\n';
 				});
                 config += '    ]\n';
                 config += '}';
             } else if (type === 'podman') {
                 const tpl = configTemplates.podman;
                 config = buildStepsComment(tpl, registry);
-				config += '<span class="key">unqualified-search-registries</span> = [<span class="string">"' + safeRegistry + '"</span>]\n\n';
+				config += '<span class="key">unqualified-search-registries</span> = [<span class="string">' + safeRegistry + '</span>]\n\n';
 				config += '[[<span class="key">registry</span>]]\n';
-				config += '<span class="key">prefix</span> = <span class="string">"' + safeRegistry + '"</span>\n';
-				config += '<span class="key">location</span> = <span class="string">"' + safeRegistry + '"</span>\n\n';
+				config += '<span class="key">prefix</span> = <span class="string">' + safeRegistry + '</span>\n';
+				config += '<span class="key">location</span> = <span class="string">' + safeRegistry + '</span>\n\n';
 				mirrors.forEach(m => {
 					config += '[[<span class="key">registry.mirror</span>]]\n';
-					config += '<span class="key">location</span> = <span class="string">"' + escapeHTML(m.replace('https://', '')) + '"</span>\n\n';
+					config += '<span class="key">location</span> = <span class="string">' + escapeHTML(JSON.stringify(m.replace('https://', ''))) + '</span>\n\n';
 				});
             } else if (type === 'containerd') {
                 const tpl = configTemplates.containerd;
                 config = buildStepsComment(tpl, registry);
-				config += '[<span class="key">plugins."io.containerd.grpc.v1.cri".registry.mirrors."' + safeRegistry + '"</span>]\n';
+				config += '[<span class="key">plugins."io.containerd.grpc.v1.cri".registry.mirrors.' + safeRegistry + '</span>]\n';
 				config += '  <span class="key">endpoint</span> = [\n';
 				mirrors.forEach((m, i) => {
-					config += '    <span class="string">"' + escapeHTML(m) + '"</span>' + (i < mirrors.length - 1 ? ',' : '') + '\n';
+					config += '    <span class="string">' + escapeHTML(JSON.stringify(m)) + '</span>' + (i < mirrors.length - 1 ? ',' : '') + '\n';
 				});
                 config += '  ]';
             } else if (type === 'nerdctl') {
                 const tpl = configTemplates.nerdctl;
                 config = buildStepsComment(tpl, registry);
-				config += '<span class="key">server</span> = <span class="string">"https://' + safeRegistry + '"</span>\n\n';
+				config += '<span class="key">server</span> = <span class="string">' + escapeHTML(JSON.stringify('https://' + registry)) + '</span>\n\n';
 				mirrors.forEach(m => {
-					config += '[<span class="key">host.<span class="string">"' + escapeHTML(m) + '"</span></span>]\n';
+					config += '[<span class="key">host.<span class="string">' + escapeHTML(JSON.stringify(m)) + '</span></span>]\n';
                     config += '  <span class="key">capabilities</span> = [<span class="string">"pull"</span>, <span class="string">"resolve"</span>]\n\n';
                 });
             }
@@ -3226,6 +3255,14 @@ type neuteredFileSystem struct {
 	fs http.FileSystem
 }
 
+type noDirectoryListingFile struct {
+	http.File
+}
+
+func (noDirectoryListingFile) Readdir(int) ([]os.FileInfo, error) {
+	return nil, os.ErrPermission
+}
+
 func (nfs neuteredFileSystem) Open(path string) (http.File, error) {
 	f, err := nfs.fs.Open(path)
 	if err != nil {
@@ -3234,43 +3271,53 @@ func (nfs neuteredFileSystem) Open(path string) (http.File, error) {
 
 	s, err := f.Stat()
 	if err != nil {
+		_ = f.Close()
 		return nil, err
 	}
 
 	// 如果是目录，检查是否有 index.html，如果没有则禁止访问
 	if s.IsDir() {
 		index := strings.TrimSuffix(path, "/") + "/index.html"
-		if _, err := nfs.fs.Open(index); err != nil {
+		indexFile, err := nfs.fs.Open(index)
+		if err != nil {
+			_ = f.Close()
 			return nil, os.ErrPermission // 返回 403 Forbidden
 		}
+		indexInfo, err := indexFile.Stat()
+		_ = indexFile.Close()
+		if err != nil || indexInfo.IsDir() {
+			_ = f.Close()
+			return nil, os.ErrPermission
+		}
+		return noDirectoryListingFile{File: f}, nil
 	}
 
 	return f, nil
 }
 
+type publicFileSystem struct {
+	http.FileSystem
+	root *os.Root
+}
+
+func newPublicFileSystem(dir string) (*publicFileSystem, error) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	return &publicFileSystem{
+		FileSystem: neuteredFileSystem{fs: http.FS(root.FS())},
+		root:       root,
+	}, nil
+}
+
+func (fs *publicFileSystem) Close() error {
+	return fs.root.Close()
+}
+
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		// 允许同源请求以及常见开发环境
-		origin := r.Header.Get("Origin")
-		host := r.Host
-
-		// 检查是否与主机匹配（包括协议）
-		if origin != "" {
-			expectedOrigin := "http://" + host
-			if r.TLS != nil {
-				expectedOrigin = "https://" + host
-			}
-
-			return origin == expectedOrigin ||
-				origin == strings.Replace(expectedOrigin, "http://", "ws://", 1) ||
-				origin == strings.Replace(expectedOrigin, "https://", "wss://", 1)
-		}
-
-		// 如果没有 Origin 头，可能是直接连接，允许
-		return true
-	},
 }
 
 func currentStatusUpdate(monitor *Monitor) *StatusUpdate {
@@ -3522,15 +3569,21 @@ func main() {
 	publicDir := "./data/public"
 
 	// 1. 自动创建目录（如果不存在），防止报错
-	if _, err := os.Stat(publicDir); os.IsNotExist(err) {
-		_ = os.MkdirAll(publicDir, 0755)
+	if err := os.MkdirAll(publicDir, 0755); err != nil {
+		log.Printf("创建静态资源目录失败: %v", err)
 	}
 
 	// 2. 注册路由：将 URL 中的 /custom/ 映射到本地的 ./data/public/ 目录
 	// 用户访问 http://site/custom/logo.png -> 读取容器内 /app/data/public/logo.png
-	// 使用 neuteredFileSystem 包装 http.Dir 以禁止目录列表显示
-	fs := neuteredFileSystem{http.Dir(publicDir)}
-	http.Handle("/custom/", http.StripPrefix("/custom/", http.FileServer(fs)))
+	// os.Root confines symlinks to the public directory; the wrapper blocks listings.
+	fs, err := newPublicFileSystem(publicDir)
+	if err != nil {
+		log.Printf("静态资源不可用: %v", err)
+		http.Handle("/custom/", http.NotFoundHandler())
+	} else {
+		defer fs.Close()
+		http.Handle("/custom/", http.StripPrefix("/custom/", http.FileServer(fs)))
+	}
 
 	http.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -3621,7 +3674,7 @@ func main() {
 		IdleTimeout:       60 * time.Second, // Keep-Alive 超时
 	}
 
-	if config.Server.TLS.Enabled && config.Server.TLS.CertFile != "" && config.Server.TLS.KeyFile != "" {
+	if config.Server.TLS.Enabled {
 		log.Printf("启用 HTTPS 模式")
 		log.Printf("证书: %s", config.Server.TLS.CertFile)
 		log.Printf("私钥: %s", config.Server.TLS.KeyFile)
