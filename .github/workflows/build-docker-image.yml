@@ -26,12 +26,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-scan-push:
-    name: Scan and publish multi-arch image
+  build:
+    name: Build immutable multi-arch candidate
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: read
       packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
 
     steps:
       - name: Checkout source
@@ -50,6 +53,7 @@ jobs:
         shell: bash
         env:
           REQUESTED_VERSION: ${{ inputs.version_tag }}
+          DOCKERHUB_NAMESPACE: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
           if [[ -n "$REQUESTED_VERSION" ]]; then
             version="$REQUESTED_VERSION"
@@ -62,45 +66,27 @@ jobs:
             printf 'Invalid build version: %s\n' "$version" >&2
             exit 1
           fi
-          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
-          printf 'build_time=%s\n' "$(date -u +%Y%m%d%H%M%S)" >> "$GITHUB_OUTPUT"
-
-      - name: Build amd64 image for security gate
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/amd64
-          load: true
-          pull: true
-          no-cache: ${{ github.event_name == 'schedule' }}
-          tags: local/docker-mirror-monitor:scan
-          build-args: |
-            VERSION=${{ steps.build_meta.outputs.version }}
-            BUILD_TIME=${{ steps.build_meta.outputs.build_time }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Scan image with Trivy
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          version: v0.76.1
-          scan-type: image
-          image-ref: local/docker-mirror-monitor:scan
-          scanners: vuln
-          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
-          ignore-unfixed: false
-          exit-code: '1'
+          namespace="${DOCKERHUB_NAMESPACE,,}"
+          if [[ ! "$namespace" =~ ^[a-z0-9]+([._-][a-z0-9]+)*$ ]]; then
+            echo 'Docker Hub username is missing or invalid' >&2
+            exit 1
+          fi
+          {
+            printf 'version=%s\n' "$version"
+            printf 'build_time=%s\n' "$(date -u +%Y%m%d%H%M%S)"
+            printf 'ghcr_image=ghcr.io/%s\n' "${GITHUB_REPOSITORY,,}"
+            printf 'dockerhub_image=docker.io/%s/docker-mirror-monitor\n' "$namespace"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GPR_TOKEN || github.token }}
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_PASSWORD }}
@@ -110,8 +96,8 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: |
-            ghcr.io/${{ github.repository }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/docker-mirror-monitor
+            ${{ steps.build_meta.outputs.ghcr_image }}
+            ${{ steps.build_meta.outputs.dockerhub_image }}
           flavor: |
             latest=false
           tags: |
@@ -119,7 +105,10 @@ jobs:
             type=raw,value=${{ inputs.version_tag }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.version_tag != '' }}
             type=raw,value=latest,enable=${{ github.event_name != 'workflow_dispatch' || inputs.make_latest }}
 
-      - name: Build and push multi-arch image
+      # Digest-only staging does not change any version or floating release tag.
+      # https://docs.docker.com/build/ci/github-actions/multi-platform/
+      - name: Build once and stage immutable image digests
+        id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -128,10 +117,178 @@ jobs:
           push: true
           pull: true
           no-cache: ${{ github.event_name == 'schedule' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: |
+            ${{ steps.build_meta.outputs.ghcr_image }}
+            ${{ steps.build_meta.outputs.dockerhub_image }}
+          outputs: type=image,push-by-digest=true,name-canonical=true,push=true
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VERSION=${{ steps.build_meta.outputs.version }}
             BUILD_TIME=${{ steps.build_meta.outputs.build_time }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Validate staged platform coverage
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          python3 scripts/release-image-gate.py index \
+            --image "ghcr.io/${GITHUB_REPOSITORY,,}@$DIGEST" --digest "$DIGEST"
+
+  scan:
+    name: Scan ${{ matrix.platform }} candidate
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            id: amd64
+          - platform: linux/arm64
+            id: arm64
+          - platform: linux/arm/v7
+            id: armv7
+          - platform: linux/ppc64le
+            id: ppc64le
+          - platform: linux/s390x
+            id: s390x
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          cache-binary: false
+
+      - name: Log in to GHCR
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GPR_TOKEN || github.token }}
+
+      - name: Resolve the expected platform image identity
+        env:
+          DIGEST: ${{ needs.build.outputs.digest }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          python3 scripts/release-image-gate.py resolve \
+            --image "ghcr.io/${GITHUB_REPOSITORY,,}@$DIGEST" --digest "$DIGEST" \
+            --platform "$PLATFORM" --output "$RUNNER_TEMP/scan-inputs.json"
+
+      - name: Scan the immutable platform with Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_PLATFORM: ${{ matrix.platform }}
+          TRIVY_IMAGE_SRC: remote
+        with:
+          version: v0.76.2
+          cache: false
+          scan-type: image
+          image-ref: ghcr.io/${{ github.repository }}@${{ needs.build.outputs.digest }}
+          scanners: vuln
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: '1'
+          format: json
+          output: ${{ runner.temp }}/trivy.json
+
+      - name: Verify scan coverage and image identity
+        run: |
+          python3 scripts/release-image-gate.py report \
+            --inputs "$RUNNER_TEMP/scan-inputs.json" --report "$RUNNER_TEMP/trivy.json"
+
+      - name: Save platform security evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-scan-${{ matrix.id }}
+          path: |
+            ${{ runner.temp }}/scan-inputs.json
+            ${{ runner.temp }}/trivy.json
+          retention-days: 7
+
+  publish:
+    name: Publish only the verified image index
+    needs: [build, scan]
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GPR_TOKEN || github.token }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - name: Extract release tags
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: |
+            ghcr.io/${{ github.repository }}
+            docker.io/${{ secrets.DOCKERHUB_USERNAME }}/docker-mirror-monitor
+          flavor: |
+            latest=false
+          tags: |
+            type=semver,pattern=v{{version}}
+            type=raw,value=${{ inputs.version_tag }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.version_tag != '' }}
+            type=raw,value=latest,enable=${{ github.event_name != 'workflow_dispatch' || inputs.make_latest }}
+
+      # A single index source is copied unchanged; no build occurs after scanning.
+      # https://docs.docker.com/reference/cli/docker/buildx/imagetools/create/
+      - name: Promote and verify the tested index in both registries
+        env:
+          DIGEST: ${{ needs.build.outputs.digest }}
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+          DOCKERHUB_NAMESPACE: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          set -euo pipefail
+          repositories=("ghcr.io/${GITHUB_REPOSITORY,,}" "docker.io/${DOCKERHUB_NAMESPACE,,}/docker-mirror-monitor")
+          readarray -t tags <<< "$IMAGE_TAGS"
+          # Validate both immutable sources before advancing any release tag.
+          for repository in "${repositories[@]}"; do
+            python3 scripts/release-image-gate.py index --image "$repository@$DIGEST" --digest "$DIGEST"
+          done
+          for repository in "${repositories[@]}"; do
+            args=()
+            for tag in "${tags[@]}"; do
+              if [[ "$tag" == "$repository:"* ]]; then args+=(-t "$tag"); fi
+            done
+            if (( ${#args[@]} == 0 )); then
+              echo 'ERROR: no release tags were selected for a required registry' >&2
+              exit 1
+            fi
+            docker buildx imagetools create "${args[@]}" "$repository@$DIGEST"
+            for tag in "${tags[@]}"; do
+              if [[ "$tag" == "$repository:"* ]]; then
+                python3 scripts/release-image-gate.py index --image "$tag" --digest "$DIGEST"
+              fi
+            done
+          done
