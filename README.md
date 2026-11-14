@@ -689,7 +689,7 @@ git push origin v1.0.0
 # 3. GitHub Actions 自动执行：
 #    - 编译 8 个平台的二进制文件
 #    - 创建 GitHub Release 并上传文件
-#    - Trivy 扫描通过后，将多架构镜像推送到 GHCR 和 Docker Hub
+#    - 构建一次并逐架构执行 Trivy 扫描，全部通过后按已验证摘要发布到 GHCR 和 Docker Hub
 ```
 
 默认分支还会在每周一 03:17 UTC 重新构建并扫描 `latest` 镜像，以纳入 Alpine 软件包安全更新。Dependabot 每周检查 Go 模块、Docker 基础镜像 digest 和 GitHub Actions；依赖更新仍需通过 CI 后再合并。
@@ -740,13 +740,13 @@ docker pull ghcr.io/okxlin/docker-mirror-monitor:v1.1.5
 
 # 添加对应的登录步骤
 - name: Login to Docker Hub
-  uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+  uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
   with:
     username: ${{ secrets.DOCKERHUB_USERNAME }}
     password: ${{ secrets.DOCKERHUB_PASSWORD }}
 
 - name: Login to Aliyun
-  uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+  uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
   with:
     registry: registry.cn-hangzhou.aliyuncs.com
     username: ${{ secrets.ALIYUN_USERNAME }}
